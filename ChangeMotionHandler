@@ -1,0 +1,623 @@
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class ChangeMotionHandler
+{
+    public void HandleMotion(ref int Touch_ue_on, ref int Touch_si_on, ref int huku_ue, ref int huku_si, ref int koudou, ref int tkb_stand, SimpleAnimation simpleAnimation, int imageCondition, bool akuryou_ue,bool akuryou_si)
+    {
+        Debug.Log("HandleMotionメソッドが呼び出されました。");
+        Debug.Log("akuryou_ueの値: " + akuryou_ue);
+        Debug.Log("Touch_ue_onの値: " + Touch_ue_on);
+        Debug.Log("Touch_si_onの値: " + Touch_si_on);
+        Debug.Log("huku_ueの値: " + huku_ue);
+        Debug.Log("huku_siの値: " + huku_si);
+        Debug.Log("koudouの値: " + koudou);
+        Debug.Log("tkb_standの値: " + tkb_stand);
+        Debug.Log("simpleAnimation: " + (simpleAnimation != null ? "存在する" : "存在しない"));
+        Debug.Log("imageConditionの値: " + imageCondition);
+
+        if (simpleAnimation == null)
+        {
+            Debug.LogError("SimpleAnimationコンポーネントが設定されていません。");
+            return;
+        }
+
+
+        if (akuryou_ue&& akuryou_si)
+        {
+            PlayAnimation(Touch_ue_on, Touch_si_on, huku_ue, huku_si, koudou, tkb_stand, simpleAnimation,true, true);
+        }
+        else if (akuryou_si)
+        {
+            PlayAnimation(Touch_ue_on, Touch_si_on, huku_ue, huku_si, koudou, tkb_stand, simpleAnimation, akuryou_ue, true);
+        }
+        else if (akuryou_ue)
+        {
+            PlayAnimation(Touch_ue_on, Touch_si_on, huku_ue, huku_si, koudou, tkb_stand, simpleAnimation, true, akuryou_si);
+        }
+
+        PlayAnimation(Touch_ue_on, Touch_si_on, huku_ue, huku_si, koudou, tkb_stand, simpleAnimation, akuryou_ue, akuryou_si);
+
+        if (imageCondition == 0)
+        {
+            PlayAnimation(Touch_ue_on, Touch_si_on, huku_ue, huku_si, koudou, tkb_stand, simpleAnimation, akuryou_ue, akuryou_si);
+
+            if (Touch_si_on == 1 && Touch_ue_on == 2)
+            {
+                PlayAnimation(1, Touch_si_on, huku_ue, huku_si, koudou, tkb_stand, simpleAnimation, akuryou_ue, akuryou_si);
+            }
+        }
+        else if (imageCondition == 1)
+        {
+            PlayAnimation(Touch_ue_on, Touch_si_on, huku_ue, huku_si, koudou, tkb_stand, simpleAnimation, akuryou_ue, akuryou_si);
+
+            if (Touch_si_on == 1 && Touch_ue_on == 2)
+            {
+                PlayAnimation(1, Touch_si_on, huku_ue, huku_si, koudou, tkb_stand, simpleAnimation, akuryou_ue, akuryou_si);
+            }
+        }
+    }
+
+    private void PlayAnimation(int Touch_ue_on, int Touch_si_on, int huku_ue, int huku_si, int koudou, int tkb_stand, SimpleAnimation simpleAnimation, bool akuryou_ue, bool akuryou_si)
+    {
+        string animationName = GetAnimationName(Touch_ue_on, Touch_si_on, huku_ue, huku_si, koudou, tkb_stand, akuryou_ue, akuryou_si);
+        if (animationName != null)
+        {
+            Debug.Log($"Playing animation: {animationName} for Touch_ue_on: {Touch_ue_on}, Touch_si_on: {Touch_si_on}, huku_ue: {huku_ue}, huku_si: {huku_si}, koudou: {koudou}, tkb_stand: {tkb_stand}, akuryou_ue: {akuryou_ue}");
+            simpleAnimation.Play(animationName);
+        }
+        else
+        {
+            Debug.LogError("アニメーション名が見つかりませんでした。");
+        }
+    }
+
+    private string GetAnimationName(int Touch_ue_on, int Touch_si_on, int huku_ue, int huku_si, int koudou, int tkb_stand, bool akuryou_ue, bool akuryou_si)
+    {
+        Debug.Log($"GetAnimationName called with parameters: Touch_ue_on={Touch_ue_on}, Touch_si_on={Touch_si_on}, huku_ue={huku_ue}, huku_si={huku_si}, koudou={koudou}, tkb_stand={tkb_stand}, akuryou_ue={akuryou_ue}");
+
+        if (akuryou_ue && akuryou_si)
+        {
+            //制服スカート
+            if (huku_ue == 0 && huku_si == 0)
+            {
+                return "122";
+            }
+            //制服パンツ
+            else if (huku_ue == 0 && huku_si == 1)
+            {
+                return "125";
+            }
+            //制服裸
+            else if (huku_ue == 0 && huku_si == 2)
+            {
+                return "128";
+            }
+            //ブラスカート
+            else if (huku_ue == 1 && huku_si == 0)
+            {
+                return "131";
+            }
+            //ブラパンツ
+            else if (huku_ue == 1 && huku_si == 1)
+            {
+                return "134";
+            }
+            //ブラ裸
+            else if (huku_ue == 1 && huku_si == 2)
+            {
+                return "137";
+            }
+            //裸スカート
+            else if (huku_ue == 2 && huku_si == 0)
+            {
+                if (tkb_stand == 0)
+                {
+                    return "140";
+                }
+                else if (tkb_stand == 1)
+                {
+                    return "140T";
+                }
+            }
+            //裸パンツ
+            else if (huku_ue == 2 && huku_si == 1)
+            {
+                if (tkb_stand == 0)
+                {
+                    return "143";
+                }
+                else if (tkb_stand == 1)
+                {
+                    return "143T";
+                }
+            }
+            //裸裸
+            else if (huku_ue == 2 && huku_si == 2)
+            {
+                if (tkb_stand == 0)
+                {
+                    return "146";
+                }
+                else if (tkb_stand == 1)
+                {
+                    return "146T";
+                }
+            }
+        }
+        else if (akuryou_si)
+        {
+            //制服スカート
+            if (huku_ue == 0 && huku_si == 0)
+            {
+                return "121";
+            }
+            //制服パンツ
+            else if (huku_ue == 0 && huku_si == 1)
+            {
+                return "124";
+            }
+            //制服裸
+            else if (huku_ue == 0 && huku_si == 2)
+            {
+                return "127";
+            }
+            //ブラスカート
+            else if (huku_ue == 1 && huku_si == 0)
+            {
+                return "130";
+            }
+            //ブラパンツ
+            else if (huku_ue == 1 && huku_si == 1)
+            {
+                return "133";
+            }
+            //ブラ裸
+            else if (huku_ue == 1 && huku_si == 2)
+            {
+                return "136";
+            }
+            //裸スカート
+            else if (huku_ue == 2 && huku_si == 0)
+            {
+                if (tkb_stand == 0)
+                {
+                    return "139";
+                }
+                else if (tkb_stand == 1)
+                {
+                    return "139T";
+                }
+            }
+            //裸パンツ
+            else if (huku_ue == 2 && huku_si == 1)
+            {
+                if (tkb_stand == 0)
+                {
+                    return "142";
+                }
+                else if (tkb_stand == 1)
+                {
+                    return "142T";
+                }
+            }
+            //裸裸
+            else if (huku_ue == 2 && huku_si == 2)
+            {
+                if (tkb_stand == 0)
+                {
+                    return "145";
+                }
+                else if (tkb_stand == 1)
+                {
+                    return "145T";
+                }
+            }
+        }
+        else if (akuryou_ue)
+        {
+            //制服スカート
+            if (huku_ue == 0 && huku_si == 0)
+            {
+                return "120";
+            }
+            //制服パンツ
+            else if (huku_ue == 0 && huku_si == 1)
+            {
+                return "123";
+            }
+            //制服裸
+            else if (huku_ue == 0 && huku_si == 2)
+            {
+                return "126";
+            }
+            //ブラスカート
+            else if (huku_ue == 1 && huku_si == 0)
+            {
+                return "129";
+            }
+            //ブラパンツ
+            else if (huku_ue == 1 && huku_si == 1)
+            {
+                return "132";
+            }
+            //ブラ裸
+            else if (huku_ue == 1 && huku_si == 2)
+            {
+                return "135";
+
+            }
+            //裸スカート
+            else if (huku_ue == 2 && huku_si == 0)
+            {
+                return "138";
+            }
+            //裸パンツ
+            else if (huku_ue == 2 && huku_si == 1)
+            {
+                return "141";
+            }
+            //裸裸
+            else if (huku_ue == 2 && huku_si == 2)
+            {
+                return "009";
+            }
+        }
+
+        if (koudou == 0)
+        {
+            //上下ノータッチ
+            if (Touch_ue_on == 0 && Touch_si_on == 0)
+            {
+                //制服スカート
+                if (huku_ue == 0 && huku_si == 0)
+                {
+                    return "002";
+                }
+                //制服パンツ
+                else if (huku_ue == 0 && huku_si == 1)
+                {
+                    return "008";
+                }
+                //制服裸
+                else if (huku_ue == 0 && huku_si == 2)
+                {
+                    return "014";
+                }
+                //ブラスカート
+                else if (huku_ue == 1 && huku_si == 0)
+                {
+                    return "040";
+                }
+                //ブラパンツ
+                else if (huku_ue == 1 && huku_si == 1)
+                {
+                    return "046";
+                }
+                //ブラ裸
+                else if (huku_ue == 1 && huku_si == 2)
+                {
+                    if (tkb_stand == 0)
+                    {
+                        return "054";
+                    }
+                    else if (tkb_stand == 1)
+                    {
+                        return "054T";
+                    }
+                }
+                //裸スカート
+                else if (huku_ue == 2 && huku_si == 0)
+                {
+                    if (tkb_stand == 0)
+                    {
+                        return "138";
+                    }
+                    else if (tkb_stand == 1)
+                    {
+                        return "138T";
+                    }
+                }
+                //裸パンツ
+                else if (huku_ue == 2 && huku_si == 1)
+                {
+                    if (tkb_stand == 0)
+                    {
+                        return "141";
+                    }
+                    else if (tkb_stand == 1)
+                    {
+                        return "141T";
+                    }
+                }
+                //裸裸
+                else if (huku_ue == 2 && huku_si == 2)
+                {
+                    if (tkb_stand == 0)
+                    {
+                        return "144";
+                    }
+                    else if (tkb_stand == 1)
+                    {
+                        return "144T";
+                    }
+                }
+            }
+        }
+        else if (koudou == 1)
+        {
+            //上下ノータッチ
+            if (Touch_ue_on == 0 && Touch_si_on == 0)
+            {
+                //制服スカート
+                if (huku_ue == 0 && huku_si == 0)
+                {
+                    return "002";
+                }
+                //制服パンツ
+                else if (huku_ue == 0 && huku_si == 1)
+                {
+                    return "008";
+                }
+                //制服裸
+                else if (huku_ue == 0 && huku_si == 2)
+                {
+                    return "014";
+                }
+                //ブラスカート
+                else if (huku_ue == 1 && huku_si == 0)
+                {
+                    return "040";
+                }
+                //ブラパンツ
+                else if (huku_ue == 1 && huku_si == 1)
+                {
+                    return "046";
+                }
+                //ブラ裸
+                else if (huku_ue == 1 && huku_si == 2)
+                {
+                    if (tkb_stand == 0)
+                    {
+                        return "054";
+                    }
+                    else if (tkb_stand == 1)
+                    {
+                        return "054T";
+                    }
+                }
+                //裸スカート
+                else if (huku_ue == 2 && huku_si == 0)
+                {
+                    return "003";
+                }
+                //裸パンツ
+                else if (huku_ue == 2 && huku_si == 1)
+                {
+                    return "009";
+                }
+                //裸裸
+                else if (huku_ue == 2 && huku_si == 2)
+                {
+                    return "009";
+                }
+            }
+            else if (Touch_ue_on == 1 && Touch_si_on == 0)
+            {
+                //制服スカート
+                if (huku_ue == 0 && huku_si == 0)
+                {
+                    return "003";
+                }
+                //制服パンツ
+                else if (huku_ue == 0 && huku_si == 1)
+                {
+                    return "009";
+                }
+                //制服裸
+                else if (huku_ue == 0 && huku_si == 2)
+                {
+                    return "009";
+                }
+                //ブラスカート
+                else if (huku_ue == 1 && huku_si == 0)
+                {
+                    return "003";
+                }
+                //ブラパンツ
+                else if (huku_ue == 1 && huku_si == 1)
+                {
+                    return "009";
+                }
+                //ブラ裸
+                else if (huku_ue == 1 && huku_si == 2)
+                {
+                    return "009";
+                }
+                //裸スカート
+                else if (huku_ue == 2 && huku_si == 0)
+                {
+                    return "003";
+                }
+                //裸パンツ
+                else if (huku_ue == 2 && huku_si == 1)
+                {
+                    return "009";
+                }
+                //裸裸
+                else if (huku_ue == 2 && huku_si == 2)
+                {
+                    return "009";
+                }
+            }
+            else if (Touch_ue_on == 2 && Touch_si_on == 0)
+            {
+                if (huku_ue == 0 && huku_si == 0)
+                {
+                    return "004";
+                }
+                else if (huku_ue == 0 && huku_si == 1)
+                {
+                    return "009";
+                }
+                else if (huku_ue == 0 && huku_si == 2)
+                {
+                    return "009";
+                }
+                else if (huku_ue == 1 && huku_si == 0)
+                {
+                    return "003";
+                }
+                else if (huku_ue == 1 && huku_si == 1)
+                {
+                    return "009";
+                }
+                else if (huku_ue == 1 && huku_si == 2)
+                {
+                    return "009";
+                }
+                else if (huku_ue == 2 && huku_si == 0)
+                {
+                    return "003";
+                }
+                else if (huku_ue == 2 && huku_si == 1)
+                {
+                    return "009";
+                }
+                else if (huku_ue == 2 && huku_si == 2)
+                {
+                    return "009";
+                }
+            }
+            else if (Touch_ue_on == 0 && Touch_si_on == 1)
+            {
+                if (huku_ue == 0 && huku_si == 0)
+                {
+                    return "005";
+                }
+                else if (huku_ue == 0 && huku_si == 1)
+                {
+                    return "011";
+                }
+                else if (huku_ue == 0 && huku_si == 2)
+                {
+                    return "017";
+                }
+                else if (huku_ue == 1 && huku_si == 0)
+                {
+                    return "043";
+                }
+                else if (huku_ue == 1 && huku_si == 1)
+                {
+                    return "049";
+                }
+                else if (huku_ue == 1 && huku_si == 2)
+                {
+                    return "065";
+                }
+                else if (huku_ue == 2 && huku_si == 0)
+                {
+                    return "086";
+                }
+                else if (huku_ue == 2 && huku_si == 1)
+                {
+                    return "055";
+                }
+                else if (huku_ue == 2 && huku_si == 2)
+                {
+                    return "092";
+                }
+            }
+            else if (Touch_ue_on == 1 && Touch_si_on == 1)
+            {
+                if (huku_ue == 0 && huku_si == 0)
+                {
+                    return "006";
+                }
+                else if (huku_ue == 0 && huku_si == 1)
+                {
+                    return "012";
+                }
+                else if (huku_ue == 0 && huku_si == 2)
+                {
+                    return "018";
+                }
+                else if (huku_ue == 1 && huku_si == 0)
+                {
+                    return "044";
+                }
+                else if (huku_ue == 1 && huku_si == 1)
+                {
+                    return "050";
+                }
+                else if (huku_ue == 1 && huku_si == 2)
+                {
+                    return "066";
+                }
+                else if (huku_ue == 2 && huku_si == 0)
+                {
+                    return "087";
+                }
+                else if (huku_ue == 2 && huku_si == 1)
+                {
+                    return "056";
+                }
+                else if (huku_ue == 2 && huku_si == 2)
+                {
+                    return "093";
+                }
+            }
+            else if (Touch_ue_on == 2 && Touch_si_on == 1)
+            {
+                if (huku_ue == 0 && huku_si == 0)
+                {
+                    return "003";
+                }
+                else if (huku_ue == 0 && huku_si == 1)
+                {
+                    return "009";
+                }
+                else if (huku_ue == 0 && huku_si == 2)
+                {
+                    return "009";
+                }
+                else if (huku_ue == 1 && huku_si == 0)
+                {
+                    return "003";
+                }
+                else if (huku_ue == 1 && huku_si == 1)
+                {
+                    return "009";
+                }
+                else if (huku_ue == 1 && huku_si == 2)
+                {
+                    return "009";
+                }
+                else if (huku_ue == 2 && huku_si == 0)
+                {
+                    return "003";
+                }
+                else if (huku_ue == 2 && huku_si == 1)
+                {
+                    return "009";
+                }
+                else if (huku_ue == 2 && huku_si == 2)
+                {
+                    return "009";
+                }
+            }
+        }
+        else if (koudou == 2)
+        {
+            // koudou == 2 の場合の条件分岐を追加
+        }
+        else if (koudou == 3)
+        {
+            // koudou == 3 の場合の条件分岐を追加
+        }
+
+        // 他の条件が一致しない場合
+        return null;
+    }
+}
