@@ -42,6 +42,7 @@ public class OsawariGameController : MonoBehaviour
 
     [Header("Status Values")]
     public float kandoValue;
+    // Minimal scaffold for upcoming game logic; currently updated per-action in ValueTickCoroutine.
     public float excitementValue;
     public float minValue = 0f;
     public float maxValue = 100f;
@@ -75,14 +76,15 @@ public class OsawariGameController : MonoBehaviour
     private Coroutine valueCoroutine;
     private Coroutine stopTransitionCoroutine;
     private Coroutine randomOnomatopoeiaCoroutine;
+    private int stopTransitionToken;
 
-    private AudioSource oneShotAudioSource;
+    private AudioSource sfxAudioSource;
     private AudioSource actionLoopAudioSource;
     private AudioSource stoppedLoopAudioSource;
 
     private void Awake()
     {
-        oneShotAudioSource = gameObject.AddComponent<AudioSource>();
+        sfxAudioSource = gameObject.AddComponent<AudioSource>();
 
         actionLoopAudioSource = gameObject.AddComponent<AudioSource>();
         actionLoopAudioSource.playOnAwake = false;
@@ -195,10 +197,12 @@ public class OsawariGameController : MonoBehaviour
 
         if (mode == AreaPlayMode.Both && isAutoRunning)
         {
-            // Same action + same area while Both auto is running: auto -> click transition.
+            // Transition from auto to click mode when user clicks the same area in Both play mode.
             autoToggleOn = false;
             UpdateAutoToggleIndicator();
             StopAuto(false);
+            StartValueTickerIfNeeded();
+            StartRandomOnomatopoeiaIfNeeded();
             return;
         }
 
@@ -268,6 +272,7 @@ public class OsawariGameController : MonoBehaviour
     {
         if (backgrounds == null || backgrounds.Count == 0)
         {
+            Debug.LogWarning("Background change requested but no backgrounds are assigned.");
             return;
         }
 
@@ -306,12 +311,15 @@ public class OsawariGameController : MonoBehaviour
             StopCoroutine(stopTransitionCoroutine);
         }
 
-        stopTransitionCoroutine = StartCoroutine(StoppedAfterTransitionCoroutine());
+        stopTransitionToken++;
+        int token = stopTransitionToken;
+        stopTransitionCoroutine = StartCoroutine(StoppedAfterTransitionCoroutine(token));
     }
 
     private void ExitStoppedState()
     {
         isStopped = false;
+        stopTransitionToken++;
         StopStoppedTransition();
         StopStoppedLoopAudio();
 
@@ -320,11 +328,11 @@ public class OsawariGameController : MonoBehaviour
         StartRandomOnomatopoeiaIfNeeded();
     }
 
-    private IEnumerator StoppedAfterTransitionCoroutine()
+    private IEnumerator StoppedAfterTransitionCoroutine(int token)
     {
         yield return new WaitForSeconds(stoppedImageDuration);
 
-        if (!isStopped)
+        if (!isStopped || token != stopTransitionToken)
         {
             yield break;
         }
@@ -391,6 +399,12 @@ public class OsawariGameController : MonoBehaviour
         while (isAutoRunning)
         {
             yield return new WaitForSeconds(GetAutoInterval());
+
+            if (!isAutoRunning || isStopped || currentAction == null || !currentArea.HasValue)
+            {
+                continue;
+            }
+
             AdvanceFrameAndApply();
         }
     }
@@ -476,15 +490,20 @@ public class OsawariGameController : MonoBehaviour
         int faceLevel = ResolveFaceLevel();
         if (faceLevel == 3)
         {
-            return pose.faceLevel3 != null ? pose.faceLevel3 : pose.faceLevel2;
+            return FirstAvailableByPriority(pose.faceLevel3, pose.faceLevel2, pose.faceLevel1);
         }
 
         if (faceLevel == 2)
         {
-            return pose.faceLevel2 != null ? pose.faceLevel2 : pose.faceLevel1;
+            return FirstAvailableByPriority(pose.faceLevel2, pose.faceLevel3, pose.faceLevel1);
         }
 
-        return pose.faceLevel1;
+        return FirstAvailableByPriority(pose.faceLevel1, pose.faceLevel2, pose.faceLevel3);
+    }
+
+    private Sprite FirstAvailableByPriority(Sprite primary, Sprite secondary, Sprite tertiary)
+    {
+        return primary ?? secondary ?? tertiary;
     }
 
     private int ResolveFaceLevel()
@@ -584,16 +603,24 @@ public class OsawariGameController : MonoBehaviour
 
     private IEnumerator RandomOnomatopoeiaCoroutine()
     {
-        while (currentAction != null && !isStopped)
+        while (!isStopped)
         {
-            foreach (var channel in currentAction.randomChannels)
+            ConstantButtonData activeAction = currentAction;
+            if (activeAction == null || !currentArea.HasValue)
+            {
+                yield break;
+            }
+
+            TouchArea activeArea = currentArea.Value;
+
+            foreach (var channel in activeAction.randomChannels)
             {
                 if (channel == null || channel.targetImage == null || channel.sprites == null || channel.sprites.Length == 0)
                 {
                     continue;
                 }
 
-                if (channel.filterByArea && (!currentArea.HasValue || channel.area != currentArea.Value))
+                if (channel.filterByArea && channel.area != activeArea)
                 {
                     channel.targetImage.gameObject.SetActive(false);
                     continue;
@@ -603,7 +630,7 @@ public class OsawariGameController : MonoBehaviour
                 channel.targetImage.sprite = channel.sprites[UnityEngine.Random.Range(0, channel.sprites.Length)];
             }
 
-            yield return new WaitForSeconds(currentAction.randomSpriteInterval);
+            yield return new WaitForSeconds(activeAction.randomSpriteInterval);
         }
     }
 
@@ -698,8 +725,8 @@ public class OsawariGameController : MonoBehaviour
             return;
         }
 
-        oneShotAudioSource.outputAudioMixerGroup = mixerGroup;
-        oneShotAudioSource.PlayOneShot(clip);
+        sfxAudioSource.outputAudioMixerGroup = mixerGroup;
+        sfxAudioSource.PlayOneShot(clip);
     }
 
     private void PlayLoop(AudioSource source, AudioClip clip, AudioMixerGroup mixerGroup)
