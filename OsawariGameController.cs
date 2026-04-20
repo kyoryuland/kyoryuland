@@ -78,6 +78,8 @@ public class OsawariGameController : MonoBehaviour
     private Coroutine stopTransitionCoroutine;
     private Coroutine randomOnomatopoeiaCoroutine;
     private int stopTransitionToken;
+    private int valueCoroutineToken;
+    private int randomOnomatopoeiaToken;
 
     private AudioSource sfxAudioSource;
     private AudioSource actionLoopAudioSource;
@@ -655,11 +657,15 @@ public class OsawariGameController : MonoBehaviour
             return;
         }
 
-        valueCoroutine = StartCoroutine(ValueTickCoroutine());
+        valueCoroutineToken++;
+        int token = valueCoroutineToken;
+        valueCoroutine = StartCoroutine(ValueTickCoroutine(token));
     }
 
     private void StopValueTicker()
     {
+        valueCoroutineToken++;
+
         if (valueCoroutine != null)
         {
             StopCoroutine(valueCoroutine);
@@ -667,12 +673,17 @@ public class OsawariGameController : MonoBehaviour
         }
     }
 
-    private IEnumerator ValueTickCoroutine()
+    private IEnumerator ValueTickCoroutine(int token)
     {
-        while (currentAction != null)
+        while (token == valueCoroutineToken && currentAction != null && HasAnyActiveSlot())
         {
             float waitSeconds = Mathf.Max(0.01f, currentAction.valueTickSeconds);
             yield return new WaitForSeconds(waitSeconds);
+
+            if (token != valueCoroutineToken)
+            {
+                yield break;
+            }
 
             if (!CanRunActionSideEffects())
             {
@@ -685,7 +696,10 @@ public class OsawariGameController : MonoBehaviour
             ApplyPose();
         }
 
-        valueCoroutine = null;
+        if (token == valueCoroutineToken)
+        {
+            valueCoroutine = null;
+        }
     }
 
     private void StartRandomOnomatopoeiaIfNeeded()
@@ -701,11 +715,15 @@ public class OsawariGameController : MonoBehaviour
             return;
         }
 
-        randomOnomatopoeiaCoroutine = StartCoroutine(RandomOnomatopoeiaCoroutine());
+        randomOnomatopoeiaToken++;
+        int token = randomOnomatopoeiaToken;
+        randomOnomatopoeiaCoroutine = StartCoroutine(RandomOnomatopoeiaCoroutine(token));
     }
 
     private void StopRandomOnomatopoeia()
     {
+        randomOnomatopoeiaToken++;
+
         if (randomOnomatopoeiaCoroutine != null)
         {
             StopCoroutine(randomOnomatopoeiaCoroutine);
@@ -726,10 +744,15 @@ public class OsawariGameController : MonoBehaviour
         }
     }
 
-    private IEnumerator RandomOnomatopoeiaCoroutine()
+    private IEnumerator RandomOnomatopoeiaCoroutine(int token)
     {
-        while (CanRunActionSideEffects())
+        while (token == randomOnomatopoeiaToken)
         {
+            if (!CanRunActionSideEffects() || currentAction?.randomChannels == null || currentAction.randomChannels.Count == 0)
+            {
+                break;
+            }
+
             ConstantButtonData activeAction = currentAction;
             foreach (var channel in activeAction.randomChannels)
             {
@@ -751,7 +774,10 @@ public class OsawariGameController : MonoBehaviour
             yield return new WaitForSeconds(activeAction.randomSpriteInterval);
         }
 
-        randomOnomatopoeiaCoroutine = null;
+        if (token == randomOnomatopoeiaToken)
+        {
+            randomOnomatopoeiaCoroutine = null;
+        }
     }
 
     private void BuildActionLookup(ConstantButtonData action)
