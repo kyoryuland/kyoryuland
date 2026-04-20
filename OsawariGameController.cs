@@ -191,12 +191,6 @@ public class OsawariGameController : MonoBehaviour
         RefreshSpeedDebug();
     }
 
-    private void Update()
-    {
-        // Keep inspector debug values fresh even if slider is modified outside UI events.
-        RefreshSpeedDebug();
-    }
-
     // Inspector helper: assign this from each touch-area button if you prefer explicit event wiring.
     public void HandleAreaClick(TouchArea area)
     {
@@ -319,6 +313,8 @@ public class OsawariGameController : MonoBehaviour
             StartValueTickerIfNeeded();
             StartRandomOnomatopoeiaIfNeeded();
         }
+
+        RefreshSpeedDebug();
     }
 
     public void HandleAutoToggleButton()
@@ -1089,15 +1085,12 @@ public class OsawariGameController : MonoBehaviour
 
     private bool IsTopUndressArea(TouchArea area)
     {
-        bool canAdvanceTopOutfit = currentTopOutfit == TopOutfit.Sweater || currentTopOutfit == TopOutfit.Bra;
-        bool isTopArea = area == TouchArea.RightBreast || area == TouchArea.LeftBreast;
-        return canAdvanceTopOutfit && isTopArea;
+        return area == TouchArea.RightBreast || area == TouchArea.LeftBreast;
     }
 
     private bool IsBottomUndressArea(TouchArea area)
     {
-        bool canAdvanceBottomOutfit = currentBottomOutfit == BottomOutfit.Skirt || currentBottomOutfit == BottomOutfit.Panties;
-        return canAdvanceBottomOutfit && area == TouchArea.Crotch;
+        return area == TouchArea.Crotch;
     }
 
     private bool TryAdvanceTopOutfit()
@@ -1185,8 +1178,8 @@ public class OsawariGameController : MonoBehaviour
 
     private void SetMenSlotImagesVisible(bool visible)
     {
-        bool hasCustomMenSlots = menSlotImages != null && menSlotImages.Count > 0;
-        if (hasCustomMenSlots)
+        bool hasConfiguredMenSlots = menSlotImages != null && menSlotImages.Count > 0;
+        if (hasConfiguredMenSlots)
         {
             foreach (Image image in menSlotImages)
             {
