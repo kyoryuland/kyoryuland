@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Audio;
+using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
 public class OsawariGameController : MonoBehaviour
@@ -27,6 +28,7 @@ public class OsawariGameController : MonoBehaviour
     public Button autoToggleButton;
     public Button stopActionButton;
     public Button backgroundChangeButton;
+    public Button nextSceneButton;
     public Slider speedSlider;
 
     [Header("Backgrounds")]
@@ -60,6 +62,16 @@ public class OsawariGameController : MonoBehaviour
     public Sprite autoOffSprite;
     public Sprite autoOnSprite;
 
+    [Header("Conversation UI")]
+    public Image conversationMaleImage;
+    public Image conversationFemaleImage;
+
+    [Header("Conversation Sequences")]
+    public ConversationSequence openingConversation;
+    public List<SingleUseButtonData> singleUseButtons = new List<SingleUseButtonData>();
+    public List<AreaConversationData> areaConversations = new List<AreaConversationData>();
+    public NextSceneData nextSceneData;
+
     private ConstantButtonData currentAction;
     private TouchArea? currentArea;
     private int currentFrameIndex;
@@ -67,6 +79,8 @@ public class OsawariGameController : MonoBehaviour
     private bool isAutoRunning;
     private bool isForcedAuto;
     private bool isStopped;
+    private bool isGameplayInputLocked;
+    private bool isNextSceneTransitioning;
     private int backgroundIndex;
 
     private readonly Dictionary<PoseKey, PoseSet> poseLookup = new Dictionary<PoseKey, PoseSet>();
@@ -76,11 +90,17 @@ public class OsawariGameController : MonoBehaviour
     private Coroutine valueCoroutine;
     private Coroutine stopTransitionCoroutine;
     private Coroutine randomOnomatopoeiaCoroutine;
+    private Coroutine activeConversationCoroutine;
+    private Coroutine openingConversationCoroutine;
+    private Coroutine nextSceneConversationCoroutine;
     private int stopTransitionToken;
+    private int conversationToken;
 
     private AudioSource sfxAudioSource;
     private AudioSource actionLoopAudioSource;
     private AudioSource stoppedLoopAudioSource;
+    private readonly HashSet<SingleUseButtonData> usedSingleUseButtons = new HashSet<SingleUseButtonData>();
+    private readonly HashSet<string> areaConversationFlags = new HashSet<string>();
 
     private void Awake()
     {
@@ -107,6 +127,11 @@ public class OsawariGameController : MonoBehaviour
         if (backgroundChangeButton != null)
         {
             backgroundChangeButton.onClick.AddListener(HandleBackgroundChangeButton);
+        }
+
+        if (nextSceneButton != null)
+        {
+            nextSceneButton.onClick.AddListener(HandleNextSceneButton);
         }
 
         if (faceAreaButton != null)
@@ -140,13 +165,35 @@ public class OsawariGameController : MonoBehaviour
             capturedAction.button.onClick.AddListener(() => HandleConstantActionClick(capturedAction));
         }
 
+        foreach (var singleUse in singleUseButtons)
+        {
+            if (singleUse?.button == null)
+            {
+                continue;
+            }
+
+            SingleUseButtonData capturedData = singleUse;
+            capturedData.button.onClick.AddListener(() => HandleSingleUseButton(capturedData));
+        }
+
         UpdateAutoToggleIndicator();
         ApplyBackground();
+        HideConversationImages();
+    }
+
+    private void Start()
+    {
+        TryStartOpeningConversation();
     }
 
     // Inspector helper: assign this from each touch-area button if you prefer explicit event wiring.
     public void HandleAreaClick(TouchArea area)
     {
+        if (isGameplayInputLocked)
+        {
+            return;
+        }
+
         if (currentAction == null)
         {
             return;
@@ -182,6 +229,7 @@ public class OsawariGameController : MonoBehaviour
                 StartAuto(false);
             }
 
+            TryPlayAreaConversation(currentAction, area);
             return;
         }
 
@@ -206,11 +254,18 @@ public class OsawariGameController : MonoBehaviour
             return;
         }
 
+        TryPlayAreaConversation(currentAction, area);
+
         AdvanceFrameAndApply();
     }
 
     public void HandleConstantActionClick(ConstantButtonData action)
     {
+        if (isGameplayInputLocked)
+        {
+            return;
+        }
+
         if (action == null)
         {
             return;
@@ -254,6 +309,11 @@ public class OsawariGameController : MonoBehaviour
 
     public void HandleAutoToggleButton()
     {
+        if (isGameplayInputLocked)
+        {
+            return;
+        }
+
         autoToggleOn = !autoToggleOn;
         UpdateAutoToggleIndicator();
 
@@ -265,6 +325,7 @@ public class OsawariGameController : MonoBehaviour
 
     public void HandleStopActionButton()
     {
+        CancelAllConversationFlowsForStop();
         EnterStoppedState();
     }
 
@@ -280,6 +341,22 @@ public class OsawariGameController : MonoBehaviour
         ApplyBackground();
     }
 
+    public void HandleNextSceneButton()
+    {
+        if (isNextSceneTransitioning)
+        {
+            return;
+        }
+
+        if (nextSceneConversationCoroutine != null)
+        {
+            StopCoroutine(nextSceneConversationCoroutine);
+            nextSceneConversationCoroutine = null;
+        }
+
+        nextSceneConversationCoroutine = StartCoroutine(HandleNextSceneConversationCoroutine());
+    }
+
     // Optional hook for dialogue/event systems.
     public void SetBackground(Sprite sprite)
     {
@@ -289,6 +366,317 @@ public class OsawariGameController : MonoBehaviour
         }
 
         backgroundImage.sprite = sprite;
+    }
+
+    private void TryStartOpeningConversation()
+    {
+        if (openingConversation == null || openingConversation.turns == null || openingConversation.turns.Count == 0)
+        {
+            return;
+        }
+
+        SetGameplayInputLock(true);
+
+        if (openingConversationCoroutine != null)
+        {
+            StopCoroutine(openingConversationCoroutine);
+        }
+
+        openingConversationCoroutine = StartCoroutine(PlaySequenceAndUnlockCoroutine(openingConversation));
+    }
+
+    private IEnumerator PlaySequenceAndUnlockCoroutine(ConversationSequence sequence)
+    {
+        yield return StartConversation(sequence);
+
+        openingConversationCoroutine = null;
+        if (!isNextSceneTransitioning)
+        {
+            SetGameplayInputLock(false);
+        }
+    }
+
+    private IEnumerator HandleNextSceneConversationCoroutine()
+    {
+        isNextSceneTransitioning = true;
+        SetGameplayInputLock(true);
+
+        if (nextSceneData?.conversation != null)
+        {
+            yield return StartConversation(nextSceneData.conversation);
+            if (!isNextSceneTransitioning)
+            {
+                yield break;
+            }
+        }
+
+        nextSceneConversationCoroutine = null;
+
+        if (nextSceneData == null || string.IsNullOrEmpty(nextSceneData.sceneName))
+        {
+            Debug.LogWarning("Next scene conversation finished, but no next scene name is configured.");
+            isNextSceneTransitioning = false;
+            SetGameplayInputLock(false);
+            yield break;
+        }
+
+        SceneManager.LoadScene(nextSceneData.sceneName);
+    }
+
+    private void HandleSingleUseButton(SingleUseButtonData data)
+    {
+        if (data == null || data.button == null || usedSingleUseButtons.Contains(data))
+        {
+            return;
+        }
+
+        usedSingleUseButtons.Add(data);
+
+        if (data.hideAfterUse)
+        {
+            data.button.gameObject.SetActive(false);
+        }
+        else
+        {
+            data.button.interactable = false;
+        }
+
+        if (data.conversation != null)
+        {
+            StartCoroutine(StartConversation(data.conversation));
+        }
+    }
+
+    private void TryPlayAreaConversation(ConstantButtonData action, TouchArea area)
+    {
+        if (action == null || areaConversations == null || areaConversations.Count == 0)
+        {
+            return;
+        }
+
+        string actionKey = GetActionConversationKey(action);
+        string flagKey = actionKey + ":" + area;
+        if (areaConversationFlags.Contains(flagKey))
+        {
+            return;
+        }
+
+        for (int i = 0; i < areaConversations.Count; i++)
+        {
+            AreaConversationData candidate = areaConversations[i];
+            if (candidate == null || candidate.area != area || candidate.conversation == null)
+            {
+                continue;
+            }
+
+            if (!string.Equals(candidate.actionName, actionKey, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            areaConversationFlags.Add(flagKey);
+            StartCoroutine(StartConversation(candidate.conversation));
+            break;
+        }
+    }
+
+    private string GetActionConversationKey(ConstantButtonData action)
+    {
+        if (!string.IsNullOrEmpty(action?.actionName))
+        {
+            return action.actionName;
+        }
+
+        if (action?.button != null && !string.IsNullOrEmpty(action.button.name))
+        {
+            return action.button.name;
+        }
+
+        return string.Empty;
+    }
+
+    private IEnumerator StartConversation(ConversationSequence sequence)
+    {
+        StopActiveConversation();
+        conversationToken++;
+        int token = conversationToken;
+
+        activeConversationCoroutine = StartCoroutine(PlayConversationSequenceCoroutine(sequence, token));
+        yield return activeConversationCoroutine;
+        activeConversationCoroutine = null;
+    }
+
+    private IEnumerator PlayConversationSequenceCoroutine(ConversationSequence sequence, int token)
+    {
+        HideConversationImages();
+
+        if (sequence == null || sequence.turns == null)
+        {
+            yield break;
+        }
+
+        for (int i = 0; i < sequence.turns.Count; i++)
+        {
+            if (token != conversationToken)
+            {
+                yield break;
+            }
+
+            ConversationTurn turn = sequence.turns[i];
+            if (turn == null)
+            {
+                continue;
+            }
+
+            Image activeImage = turn.speaker == ConversationSpeaker.Male ? conversationMaleImage : conversationFemaleImage;
+            Image inactiveImage = turn.speaker == ConversationSpeaker.Male ? conversationFemaleImage : conversationMaleImage;
+
+            if (inactiveImage != null)
+            {
+                inactiveImage.gameObject.SetActive(false);
+            }
+
+            if (activeImage == null)
+            {
+                continue;
+            }
+
+            CanvasGroup canvasGroup = EnsureCanvasGroup(activeImage);
+            activeImage.sprite = turn.sprite;
+            activeImage.gameObject.SetActive(true);
+            canvasGroup.alpha = 0f;
+
+            yield return FadeConversation(canvasGroup, 0f, 1f, turn.fadeInDuration, token);
+            if (token != conversationToken)
+            {
+                yield break;
+            }
+
+            if (turn.audioClip != null)
+            {
+                PlayOneShot(turn.audioClip, turn.audioMixerGroup);
+            }
+
+            if (turn.displayDuration > 0f)
+            {
+                yield return new WaitForSeconds(turn.displayDuration);
+            }
+
+            if (token != conversationToken)
+            {
+                yield break;
+            }
+
+            yield return FadeConversation(canvasGroup, 1f, 0f, turn.fadeOutDuration, token);
+            if (token != conversationToken)
+            {
+                yield break;
+            }
+
+            activeImage.gameObject.SetActive(false);
+        }
+
+        if (token == conversationToken)
+        {
+            HideConversationImages();
+        }
+    }
+
+    private IEnumerator FadeConversation(CanvasGroup canvasGroup, float from, float to, float duration, int token)
+    {
+        if (canvasGroup == null)
+        {
+            yield break;
+        }
+
+        if (duration <= 0f)
+        {
+            canvasGroup.alpha = to;
+            yield break;
+        }
+
+        float elapsed = 0f;
+        canvasGroup.alpha = from;
+
+        while (elapsed < duration)
+        {
+            if (token != conversationToken)
+            {
+                yield break;
+            }
+
+            elapsed += Time.deltaTime;
+            float t = Mathf.Clamp01(elapsed / duration);
+            canvasGroup.alpha = Mathf.Lerp(from, to, t);
+            yield return null;
+        }
+
+        canvasGroup.alpha = to;
+    }
+
+    private CanvasGroup EnsureCanvasGroup(Image image)
+    {
+        if (image == null)
+        {
+            return null;
+        }
+
+        CanvasGroup canvasGroup = image.GetComponent<CanvasGroup>();
+        if (canvasGroup == null)
+        {
+            canvasGroup = image.gameObject.AddComponent<CanvasGroup>();
+        }
+
+        return canvasGroup;
+    }
+
+    private void StopActiveConversation()
+    {
+        if (activeConversationCoroutine != null)
+        {
+            StopCoroutine(activeConversationCoroutine);
+            activeConversationCoroutine = null;
+        }
+
+        HideConversationImages();
+    }
+
+    private void CancelAllConversationFlowsForStop()
+    {
+        if (openingConversationCoroutine != null)
+        {
+            StopCoroutine(openingConversationCoroutine);
+            openingConversationCoroutine = null;
+        }
+
+        if (nextSceneConversationCoroutine != null)
+        {
+            StopCoroutine(nextSceneConversationCoroutine);
+            nextSceneConversationCoroutine = null;
+        }
+
+        isNextSceneTransitioning = false;
+        SetGameplayInputLock(false);
+        conversationToken++;
+        StopActiveConversation();
+    }
+
+    private void HideConversationImages()
+    {
+        if (conversationMaleImage != null)
+        {
+            conversationMaleImage.gameObject.SetActive(false);
+        }
+
+        if (conversationFemaleImage != null)
+        {
+            conversationFemaleImage.gameObject.SetActive(false);
+        }
+    }
+
+    private void SetGameplayInputLock(bool locked)
+    {
+        isGameplayInputLocked = locked;
     }
 
     private void EnterStoppedState()
@@ -905,6 +1293,53 @@ public class ConstantButtonData
     [Header("Optional Random Onomatopoeia")]
     public float randomSpriteInterval = 0.6f;
     public List<RandomSpriteChannel> randomChannels = new List<RandomSpriteChannel>();
+}
+
+[Serializable]
+public class SingleUseButtonData
+{
+    public Button button;
+    public ConversationSequence conversation;
+    public bool hideAfterUse = true;
+}
+
+[Serializable]
+public class AreaConversationData
+{
+    public string actionName;
+    public TouchArea area;
+    public ConversationSequence conversation;
+}
+
+[Serializable]
+public class NextSceneData
+{
+    public string sceneName;
+    public ConversationSequence conversation;
+}
+
+[Serializable]
+public class ConversationSequence
+{
+    public List<ConversationTurn> turns = new List<ConversationTurn>();
+}
+
+[Serializable]
+public class ConversationTurn
+{
+    public ConversationSpeaker speaker;
+    public Sprite sprite;
+    public AudioClip audioClip;
+    public AudioMixerGroup audioMixerGroup;
+    public float displayDuration = 1f;
+    public float fadeInDuration = 0.15f;
+    public float fadeOutDuration = 0.15f;
+}
+
+public enum ConversationSpeaker
+{
+    Male,
+    Female
 }
 
 public struct PoseKey : IEquatable<PoseKey>
