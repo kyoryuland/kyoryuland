@@ -416,6 +416,11 @@ public class OsawariGameController : MonoBehaviour
         while (slotStates[slot].isAutoRunning)
         {
             SlotRuntimeState state = slotStates[slot];
+            if (!state.isActive)
+            {
+                yield break;
+            }
+
             yield return new WaitForSeconds(GetAutoInterval(state.area));
 
             state = slotStates[slot];
@@ -516,7 +521,7 @@ public class OsawariGameController : MonoBehaviour
         }
 
         SlotRuntimeState state = slotStates[definition.usedSlot];
-        return state.isActive && state.area == area ? Mathf.Max(0, state.frameIndex) : 0;
+        return state.isActive && state.area == area ? state.frameIndex : 0;
     }
 
     private void RefreshManSlotVisuals()
@@ -574,6 +579,7 @@ public class OsawariGameController : MonoBehaviour
 
         SlotRuntimeState state = slotStates[slot];
         state.isActive = false;
+        state.area = default;
         state.pose = null;
         state.frameIndex = 0;
         slotStates[slot] = state;
