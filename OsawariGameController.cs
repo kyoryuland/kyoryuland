@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
@@ -11,7 +11,11 @@ public class OsawariGameController : MonoBehaviour
     public Image backgroundImage;
     public Image bodyImage;
     public Image faceImage;
-    public Image manImage;
+    // Wire these to the dedicated men slot layer images.
+    public Image manMouthImage;
+    public Image manRightHandImage;
+    public Image manLeftHandImage;
+    public Image manCrotchImage;
     public Image subImage;
 
     [Header("Touch Area Buttons")]
@@ -42,7 +46,6 @@ public class OsawariGameController : MonoBehaviour
 
     [Header("Status Values")]
     public float kandoValue;
-    // Minimal scaffold for upcoming game logic; currently updated per-action in ValueTickCoroutine.
     public float excitementValue;
     public float minValue = 0f;
     public float maxValue = 100f;
@@ -51,32 +54,32 @@ public class OsawariGameController : MonoBehaviour
     public float fallbackAutoBaseInterval = 0.5f;
     public float stoppedImageDuration = 1.5f;
 
-    [Header("Stopped Visual Sets")]
-    public StoppedVisualSet stoppedVisual;
-    public StoppedVisualSet stoppedAfterVisual;
+    [Header("Stopped Face Fallbacks")]
+    public FaceLevelSet fallbackStopFaceSet;
+    public FaceLevelSet fallbackAfterStopFaceSet;
 
     [Header("Optional Auto Toggle Indicator")]
     public Image autoToggleIndicator;
     public Sprite autoOffSprite;
     public Sprite autoOnSprite;
 
+    private readonly Dictionary<MenSlot, SlotRuntimeState> slotStates = new Dictionary<MenSlot, SlotRuntimeState>();
+    private readonly Dictionary<MenSlot, Image> slotImages = new Dictionary<MenSlot, Image>();
+    private readonly Dictionary<TouchArea, ActionAreaDefinition> areaDefinitionLookup = new Dictionary<TouchArea, ActionAreaDefinition>();
+
     private ConstantButtonData currentAction;
-    private TouchArea? currentArea;
-    private int currentFrameIndex;
+    private ConstantButtonData lastActionForStopFace;
+    private TouchArea? lastVisualArea;
     private bool autoToggleOn;
-    private bool isAutoRunning;
-    private bool isForcedAuto;
     private bool isStopped;
     private int backgroundIndex;
 
-    private readonly Dictionary<PoseKey, PoseSet> poseLookup = new Dictionary<PoseKey, PoseSet>();
-    private readonly Dictionary<TouchArea, AreaPlayMode> areaModeLookup = new Dictionary<TouchArea, AreaPlayMode>();
-
-    private Coroutine autoCoroutine;
     private Coroutine valueCoroutine;
     private Coroutine stopTransitionCoroutine;
     private Coroutine randomOnomatopoeiaCoroutine;
     private int stopTransitionToken;
+    private int valueCoroutineToken;
+    private int randomOnomatopoeiaToken;
 
     private AudioSource sfxAudioSource;
     private AudioSource actionLoopAudioSource;
@@ -93,6 +96,16 @@ public class OsawariGameController : MonoBehaviour
         stoppedLoopAudioSource = gameObject.AddComponent<AudioSource>();
         stoppedLoopAudioSource.playOnAwake = false;
         stoppedLoopAudioSource.loop = true;
+
+        slotImages[MenSlot.Mouth] = manMouthImage;
+        slotImages[MenSlot.RightHand] = manRightHandImage;
+        slotImages[MenSlot.LeftHand] = manLeftHandImage;
+        slotImages[MenSlot.Crotch] = manCrotchImage;
+
+        foreach (MenSlot slot in Enum.GetValues(typeof(MenSlot)))
+        {
+            slotStates[slot] = new SlotRuntimeState();
+        }
 
         if (autoToggleButton != null)
         {
@@ -142,9 +155,9 @@ public class OsawariGameController : MonoBehaviour
 
         UpdateAutoToggleIndicator();
         ApplyBackground();
+        HideAllManSlotImages();
     }
 
-    // Inspector helper: assign this from each touch-area button if you prefer explicit event wiring.
     public void HandleAreaClick(TouchArea area)
     {
         if (currentAction == null)
@@ -152,61 +165,76 @@ public class OsawariGameController : MonoBehaviour
             return;
         }
 
-        bool isAreaChanged = !currentArea.HasValue || currentArea.Value != area;
-        AreaPlayMode mode = GetAreaPlayMode(area);
-
-        if (isAutoRunning && isAreaChanged)
+        ActionAreaDefinition definition = FindAreaDefinition(area);
+        if (definition == null)
         {
-            StopAuto(false);
-        }
-
-        if (isStopped)
-        {
-            ExitStoppedState();
-        }
-
-        if (isAreaChanged)
-        {
-            currentArea = area;
-            currentFrameIndex = 0;
-            ApplyPose();
-            StartValueTickerIfNeeded();
-            StartRandomOnomatopoeiaIfNeeded();
-
-            if (mode == AreaPlayMode.AutoOnly)
-            {
-                StartAuto(true);
-            }
-            else if (mode == AreaPlayMode.Both && autoToggleOn)
-            {
-                StartAuto(false);
-            }
-
             return;
         }
+
+        MenSlot targetSlot = definition.usedSlot;
+        AreaPlayMode mode = ResolvePlayMode(definition);
+        SlotRuntimeState state = slotStates[targetSlot];
+
+        bool isSameAreaOnSameSlot = state.isActive && state.area == area;
+
+        if (isSameAreaOnSameSlot)
+        {
+            if (mode == AreaPlayMode.AutoOnly)
+            {
+                if (!state.isAutoRunning)
+                {
+                    StartSlotAuto(targetSlot, true);
+                }
+
+                return;
+            }
+
+            if (mode == AreaPlayMode.Both && state.isAutoRunning)
+            {
+                autoToggleOn = false;
+                UpdateAutoToggleIndicator();
+                StopSlotAuto(targetSlot, false);
+                EnsureRuntimeCoroutines();
+                return;
+            }
+
+            AdvanceSlotFrame(targetSlot);
+            lastVisualArea = area;
+            ApplyPose();
+            EnsureRuntimeCoroutines();
+            return;
+        }
+
+        if (definition.exclusiveOnly)
+        {
+            StopAllSlotActions();
+        }
+        else
+        {
+            StopSlotAction(targetSlot);
+        }
+
+        SlotRuntimeState newState = slotStates[targetSlot];
+        newState.isActive = true;
+        newState.area = area;
+        newState.mode = mode;
+        newState.frameIndex = 0;
+        newState.pose = FindPose(definition);
+        slotStates[targetSlot] = newState;
+
+        lastVisualArea = area;
+        ApplyPose();
 
         if (mode == AreaPlayMode.AutoOnly)
         {
-            if (!isAutoRunning)
-            {
-                StartAuto(true);
-            }
-
-            return;
+            StartSlotAuto(targetSlot, true);
         }
-
-        if (mode == AreaPlayMode.Both && isAutoRunning)
+        else if (mode == AreaPlayMode.Both && autoToggleOn)
         {
-            // Transition from auto to click mode when user clicks the same area in Both play mode.
-            autoToggleOn = false;
-            UpdateAutoToggleIndicator();
-            StopAuto(false);
-            StartValueTickerIfNeeded();
-            StartRandomOnomatopoeiaIfNeeded();
-            return;
+            StartSlotAuto(targetSlot, false);
         }
 
-        AdvanceFrameAndApply();
+        EnsureRuntimeCoroutines();
     }
 
     public void HandleConstantActionClick(ConstantButtonData action)
@@ -216,40 +244,18 @@ public class OsawariGameController : MonoBehaviour
             return;
         }
 
-        bool actionChanged = currentAction != action;
         currentAction = action;
-        currentFrameIndex = 0;
         isStopped = false;
 
         BuildActionLookup(currentAction);
 
         StopStoppedTransition();
-        StopAuto(false);
-        StopActionLoopAudio();
         StopStoppedLoopAudio();
+        StopAllSlotActions();
 
         PlayOneShot(action.startClip, action.audioMixerGroup);
 
-        if (currentArea.HasValue)
-        {
-            ApplyPose();
-
-            AreaPlayMode mode = GetAreaPlayMode(currentArea.Value);
-            if (mode == AreaPlayMode.AutoOnly)
-            {
-                StartAuto(true);
-            }
-            else if (mode == AreaPlayMode.Both && autoToggleOn)
-            {
-                StartAuto(false);
-            }
-        }
-
-        if (actionChanged)
-        {
-            StartValueTickerIfNeeded();
-            StartRandomOnomatopoeiaIfNeeded();
-        }
+        EnsureRuntimeCoroutines();
     }
 
     public void HandleAutoToggleButton()
@@ -257,10 +263,33 @@ public class OsawariGameController : MonoBehaviour
         autoToggleOn = !autoToggleOn;
         UpdateAutoToggleIndicator();
 
-        if (!autoToggleOn && isAutoRunning && !isForcedAuto)
+        foreach (MenSlot slot in Enum.GetValues(typeof(MenSlot)))
         {
-            StopAuto(false);
+            SlotRuntimeState state = slotStates[slot];
+            if (!state.isActive)
+            {
+                continue;
+            }
+
+            if (state.mode != AreaPlayMode.Both)
+            {
+                continue;
+            }
+
+            if (autoToggleOn)
+            {
+                if (!state.isAutoRunning)
+                {
+                    StartSlotAuto(slot, false);
+                }
+            }
+            else if (state.isAutoRunning && !state.isForcedAuto)
+            {
+                StopSlotAuto(slot, false);
+            }
         }
+
+        EnsureRuntimeCoroutines();
     }
 
     public void HandleStopActionButton()
@@ -280,7 +309,6 @@ public class OsawariGameController : MonoBehaviour
         ApplyBackground();
     }
 
-    // Optional hook for dialogue/event systems.
     public void SetBackground(Sprite sprite)
     {
         if (backgroundImage == null)
@@ -298,34 +326,25 @@ public class OsawariGameController : MonoBehaviour
             return;
         }
 
+        lastActionForStopFace = currentAction;
+
         isStopped = true;
-        StopAuto(false);
+        StopAllSlotActions();
+        HideAllManSlotImages();
         StopValueTicker();
         StopRandomOnomatopoeia();
         StopActionLoopAudio();
 
-        ApplyStoppedVisual(stoppedVisual);
+        ApplyStoppedFace(lastActionForStopFace?.stopFaceSet, fallbackStopFaceSet);
 
-        if (stopTransitionCoroutine != null)
-        {
-            StopCoroutine(stopTransitionCoroutine);
-        }
+        currentAction = null;
+        lastVisualArea = null;
+        areaDefinitionLookup.Clear();
 
+        StopStoppedTransition();
         stopTransitionToken++;
         int token = stopTransitionToken;
         stopTransitionCoroutine = StartCoroutine(StoppedAfterTransitionCoroutine(token));
-    }
-
-    private void ExitStoppedState()
-    {
-        isStopped = false;
-        stopTransitionToken++;
-        StopStoppedTransition();
-        StopStoppedLoopAudio();
-
-        ApplyPose();
-        StartValueTickerIfNeeded();
-        StartRandomOnomatopoeiaIfNeeded();
     }
 
     private IEnumerator StoppedAfterTransitionCoroutine(int token)
@@ -337,84 +356,98 @@ public class OsawariGameController : MonoBehaviour
             yield break;
         }
 
-        ApplyStoppedVisual(stoppedAfterVisual);
+        ApplyStoppedFace(lastActionForStopFace?.afterStopFaceSet, fallbackAfterStopFaceSet);
     }
 
-    private void ApplyStoppedVisual(StoppedVisualSet visual)
+    private void ApplyStoppedFace(FaceLevelSet primary, FaceLevelSet fallback)
     {
-        if (visual == null)
+        FaceLevelSet set = primary ?? fallback;
+        if (set == null)
         {
             return;
         }
 
-        ApplyFrameToImage(bodyImage, visual.bodySprite);
-        ApplyFrameToImage(faceImage, visual.faceSprite);
-        ApplyFrameToImage(manImage, visual.manSprite);
-        ApplyFrameToImage(subImage, visual.subSprite);
-
-        PlayOneShot(visual.oneShotClip, visual.audioMixerGroup);
-        PlayLoop(stoppedLoopAudioSource, visual.loopClip, visual.audioMixerGroup);
+        ApplyFrameToImage(faceImage, SelectFaceByKando(set.level1, set.level2, set.level3));
+        PlayOneShot(set.oneShotClip, set.audioMixerGroup);
+        PlayLoop(stoppedLoopAudioSource, set.loopClip, set.audioMixerGroup);
     }
 
-    private void StartAuto(bool forced)
+    private void StartSlotAuto(MenSlot slot, bool forced)
     {
-        if (!currentArea.HasValue)
+        SlotRuntimeState state = slotStates[slot];
+        if (!state.isActive)
         {
             return;
         }
 
-        StopAuto(false);
+        StopSlotAuto(slot, false);
 
-        isAutoRunning = true;
-        isForcedAuto = forced;
+        state.isAutoRunning = true;
+        state.isForcedAuto = forced;
+        state.autoCoroutine = StartCoroutine(AutoFrameCoroutine(slot));
+        slotStates[slot] = state;
 
-        if (currentAction != null)
-        {
-            PlayLoop(actionLoopAudioSource, currentAction.loopClip, currentAction.audioMixerGroup);
-        }
-
-        autoCoroutine = StartCoroutine(AutoFrameCoroutine());
+        UpdateActionLoopAudio();
     }
 
-    private void StopAuto(bool clearForced)
+    private void StopSlotAuto(MenSlot slot, bool clearForced)
     {
-        if (autoCoroutine != null)
+        SlotRuntimeState state = slotStates[slot];
+
+        if (state.autoCoroutine != null)
         {
-            StopCoroutine(autoCoroutine);
-            autoCoroutine = null;
+            StopCoroutine(state.autoCoroutine);
+            state.autoCoroutine = null;
         }
 
-        isAutoRunning = false;
+        state.isAutoRunning = false;
 
         if (clearForced)
         {
-            isForcedAuto = false;
+            state.isForcedAuto = false;
         }
 
-        StopActionLoopAudio();
+        slotStates[slot] = state;
+        UpdateActionLoopAudio();
     }
 
-    private IEnumerator AutoFrameCoroutine()
+    private IEnumerator AutoFrameCoroutine(MenSlot slot)
     {
-        while (isAutoRunning)
+        while (slotStates[slot].isAutoRunning)
         {
-            yield return new WaitForSeconds(GetAutoInterval());
+            SlotRuntimeState state = slotStates[slot];
+            if (!state.isActive)
+            {
+                yield break;
+            }
 
-            if (!isAutoRunning || isStopped || currentAction == null || !currentArea.HasValue)
+            yield return new WaitForSeconds(GetAutoInterval(state.area));
+
+            state = slotStates[slot];
+            if (!state.isAutoRunning || isStopped || currentAction == null)
             {
                 continue;
             }
 
-            AdvanceFrameAndApply();
+            AdvanceSlotFrame(slot);
+            lastVisualArea = state.area;
+            ApplyPose();
         }
     }
 
-    private float GetAutoInterval()
+    private float GetAutoInterval(TouchArea area)
     {
         float baseInterval = fallbackAutoBaseInterval;
+
         if (currentAction != null && currentAction.autoBaseInterval > 0f)
         {
             baseInterval = currentAction.autoBaseInterval;
+        }
+
+        ActionAreaDefinition definition = FindAreaDefinition(area);
+        if (definition != null && definition.useAutoBaseIntervalOverride && definition.autoBaseIntervalOverride > 0f)
+        {
+            baseInterval = definition.autoBaseIntervalOverride;
         }
 
         float speedMultiplier = 1f;
@@ -426,42 +459,138 @@ public class OsawariGameController : MonoBehaviour
         return baseInterval / speedMultiplier;
     }
 
-    private void AdvanceFrameAndApply()
+    private void AdvanceSlotFrame(MenSlot slot)
     {
-        if (currentAction == null || !currentArea.HasValue)
+        SlotRuntimeState state = slotStates[slot];
+        if (!state.isActive)
         {
             return;
         }
 
-        PoseSet pose = FindPose(currentArea.Value);
-        int frameCount = Mathf.Max(
-            SafeLength(pose?.manFrames),
-            SafeLength(pose?.bodyFrames),
-            SafeLength(pose?.subFrames),
-            1
-        );
-
-        currentFrameIndex = (currentFrameIndex + 1) % frameCount;
-        ApplyPose();
-    }
-
-    private void ApplyPose()
-    {
-        if (currentAction == null || !currentArea.HasValue || isStopped)
-        {
-            return;
-        }
-
-        PoseSet pose = FindPose(currentArea.Value);
+        PoseSet pose = state.pose ?? FindPose(state.area);
         if (pose == null)
         {
             return;
         }
 
-        ApplyFrameToImage(bodyImage, SelectFrame(pose.bodyFrames, currentFrameIndex));
-        ApplyFrameToImage(manImage, SelectFrame(pose.manFrames, currentFrameIndex));
-        ApplyFrameToImage(subImage, SelectFrame(pose.subFrames, currentFrameIndex));
-        ApplyFrameToImage(faceImage, SelectFaceByKando(pose));
+        int frameCount = Mathf.Max(
+            SafeLength(GetSlotFrames(pose, slot)),
+            SafeLength(pose.bodyFrames),
+            SafeLength(pose.subFrames),
+            1);
+
+        state.frameIndex = (state.frameIndex + 1) % frameCount;
+        state.pose = pose;
+        slotStates[slot] = state;
+    }
+
+    private void ApplyPose()
+    {
+        if (isStopped)
+        {
+            return;
+        }
+
+        if (!lastVisualArea.HasValue)
+        {
+            RefreshManSlotVisuals();
+            return;
+        }
+
+        PoseSet visualPose = FindPose(lastVisualArea.Value);
+        if (visualPose == null)
+        {
+            RefreshManSlotVisuals();
+            return;
+        }
+
+        int visualFrame = ResolveVisualFrameIndex(lastVisualArea.Value);
+        ApplyFrameToImage(bodyImage, SelectFrame(visualPose.bodyFrames, visualFrame));
+        ApplyFrameToImage(subImage, SelectFrame(visualPose.subFrames, visualFrame));
+        ApplyFrameToImage(faceImage, SelectFaceByKando(visualPose.faceLevel1, visualPose.faceLevel2, visualPose.faceLevel3));
+
+        RefreshManSlotVisuals();
+    }
+
+    private int ResolveVisualFrameIndex(TouchArea area)
+    {
+        ActionAreaDefinition definition = FindAreaDefinition(area);
+        if (definition == null)
+        {
+            return 0;
+        }
+
+        SlotRuntimeState state = slotStates[definition.usedSlot];
+        return state.isActive && state.area == area ? state.frameIndex : 0;
+    }
+
+    private void RefreshManSlotVisuals()
+    {
+        foreach (MenSlot slot in Enum.GetValues(typeof(MenSlot)))
+        {
+            SlotRuntimeState state = slotStates[slot];
+            Image slotImage = GetSlotImage(slot);
+            if (slotImage == null)
+            {
+                continue;
+            }
+
+            if (!state.isActive || isStopped || currentAction == null)
+            {
+                slotImage.gameObject.SetActive(false);
+                continue;
+            }
+
+            PoseSet pose = state.pose ?? FindPose(state.area);
+            Sprite sprite = SelectFrame(GetSlotFrames(pose, slot), state.frameIndex);
+            if (sprite == null)
+            {
+                slotImage.gameObject.SetActive(false);
+                continue;
+            }
+
+            slotImage.gameObject.SetActive(true);
+            slotImage.sprite = sprite;
+        }
+    }
+
+    private void HideAllManSlotImages()
+    {
+        foreach (var entry in slotImages)
+        {
+            if (entry.Value != null)
+            {
+                entry.Value.gameObject.SetActive(false);
+            }
+        }
+    }
+
+    private void StopAllSlotActions()
+    {
+        foreach (MenSlot slot in Enum.GetValues(typeof(MenSlot)))
+        {
+            StopSlotAction(slot);
+        }
+    }
+
+    private void StopSlotAction(MenSlot slot)
+    {
+        StopSlotAuto(slot, true);
+
+        SlotRuntimeState state = slotStates[slot];
+        state.isActive = false;
+        state.area = default;
+        state.pose = null;
+        state.frameIndex = 0;
+        slotStates[slot] = state;
+
+        Image image = GetSlotImage(slot);
+        if (image != null)
+        {
+            image.gameObject.SetActive(false);
+        }
+
+        EnsureRuntimeCoroutines();
     }
 
     private void ApplyBackground()
@@ -485,20 +614,20 @@ public class OsawariGameController : MonoBehaviour
         image.sprite = sprite;
     }
 
-    private Sprite SelectFaceByKando(PoseSet pose)
+    private Sprite SelectFaceByKando(Sprite faceLevel1, Sprite faceLevel2, Sprite faceLevel3)
     {
         int faceLevel = ResolveFaceLevel();
         if (faceLevel == 3)
         {
-            return FirstAvailableByPriority(pose.faceLevel3, pose.faceLevel2, pose.faceLevel1);
+            return FirstAvailableByPriority(faceLevel3, faceLevel2, faceLevel1);
         }
 
         if (faceLevel == 2)
         {
-            return FirstAvailableByPriority(pose.faceLevel2, pose.faceLevel3, pose.faceLevel1);
+            return FirstAvailableByPriority(faceLevel2, faceLevel3, faceLevel1);
         }
 
-        return FirstAvailableByPriority(pose.faceLevel1, pose.faceLevel2, pose.faceLevel3);
+        return FirstAvailableByPriority(faceLevel1, faceLevel2, faceLevel3);
     }
 
     private Sprite FirstAvailableByPriority(Sprite primary, Sprite secondary, Sprite tertiary)
@@ -523,22 +652,26 @@ public class OsawariGameController : MonoBehaviour
 
     private void StartValueTickerIfNeeded()
     {
-        if (valueCoroutine != null)
+        if (!CanRunActionSideEffects())
         {
-            StopCoroutine(valueCoroutine);
-        }
-
-        if (currentAction == null)
-        {
-            valueCoroutine = null;
+            StopValueTicker();
             return;
         }
 
-        valueCoroutine = StartCoroutine(ValueTickCoroutine());
+        if (valueCoroutine != null)
+        {
+            return;
+        }
+
+        valueCoroutineToken++;
+        int token = valueCoroutineToken;
+        valueCoroutine = StartCoroutine(ValueTickCoroutine(token));
     }
 
     private void StopValueTicker()
     {
+        valueCoroutineToken++;
+
         if (valueCoroutine != null)
         {
             StopCoroutine(valueCoroutine);
@@ -546,14 +679,19 @@ public class OsawariGameController : MonoBehaviour
         }
     }
 
-    private IEnumerator ValueTickCoroutine()
+    private IEnumerator ValueTickCoroutine(int token)
     {
-        while (currentAction != null)
+        while (token == valueCoroutineToken && currentAction != null && HasAnyActiveSlot())
         {
             float waitSeconds = Mathf.Max(0.01f, currentAction.valueTickSeconds);
             yield return new WaitForSeconds(waitSeconds);
 
-            if (isStopped)
+            if (token != valueCoroutineToken)
+            {
+                yield break;
+            }
+
+            if (!CanRunActionSideEffects())
             {
                 continue;
             }
@@ -563,22 +701,35 @@ public class OsawariGameController : MonoBehaviour
 
             ApplyPose();
         }
+
+        if (token == valueCoroutineToken)
+        {
+            valueCoroutine = null;
+        }
     }
 
     private void StartRandomOnomatopoeiaIfNeeded()
     {
-        StopRandomOnomatopoeia();
+        if (!CanRunActionSideEffects() || currentAction?.randomChannels == null || currentAction.randomChannels.Count == 0)
+        {
+            StopRandomOnomatopoeia();
+            return;
+        }
 
-        if (currentAction == null || currentAction.randomChannels == null || currentAction.randomChannels.Count == 0)
+        if (randomOnomatopoeiaCoroutine != null)
         {
             return;
         }
 
-        randomOnomatopoeiaCoroutine = StartCoroutine(RandomOnomatopoeiaCoroutine());
+        randomOnomatopoeiaToken++;
+        int token = randomOnomatopoeiaToken;
+        randomOnomatopoeiaCoroutine = StartCoroutine(RandomOnomatopoeiaCoroutine(token));
     }
 
     private void StopRandomOnomatopoeia()
     {
+        randomOnomatopoeiaToken++;
+
         if (randomOnomatopoeiaCoroutine != null)
         {
             StopCoroutine(randomOnomatopoeiaCoroutine);
@@ -592,27 +743,23 @@ public class OsawariGameController : MonoBehaviour
 
         foreach (var channel in currentAction.randomChannels)
         {
-            if (channel?.targetImage == null)
+            if (channel?.targetImage != null)
             {
-                continue;
+                channel.targetImage.gameObject.SetActive(false);
             }
-
-            channel.targetImage.gameObject.SetActive(false);
         }
     }
 
-    private IEnumerator RandomOnomatopoeiaCoroutine()
+    private IEnumerator RandomOnomatopoeiaCoroutine(int token)
     {
-        while (!isStopped)
+        while (token == randomOnomatopoeiaToken)
         {
-            ConstantButtonData activeAction = currentAction;
-            if (activeAction == null || !currentArea.HasValue)
+            if (!CanRunActionSideEffects() || currentAction?.randomChannels == null || currentAction.randomChannels.Count == 0)
             {
-                yield break;
+                break;
             }
 
-            TouchArea activeArea = currentArea.Value;
-
+            ConstantButtonData activeAction = currentAction;
             foreach (var channel in activeAction.randomChannels)
             {
                 if (channel == null || channel.targetImage == null || channel.sprites == null || channel.sprites.Length == 0)
@@ -620,7 +767,7 @@ public class OsawariGameController : MonoBehaviour
                     continue;
                 }
 
-                if (channel.filterByArea && channel.area != activeArea)
+                if (channel.filterByArea && !IsAreaActive(channel.area))
                 {
                     channel.targetImage.gameObject.SetActive(false);
                     continue;
@@ -632,65 +779,159 @@ public class OsawariGameController : MonoBehaviour
 
             yield return new WaitForSeconds(activeAction.randomSpriteInterval);
         }
+
+        if (token == randomOnomatopoeiaToken)
+        {
+            randomOnomatopoeiaCoroutine = null;
+        }
     }
 
     private void BuildActionLookup(ConstantButtonData action)
     {
-        poseLookup.Clear();
-        areaModeLookup.Clear();
+        areaDefinitionLookup.Clear();
 
-        if (action == null)
+        if (action?.areaDefinitions == null)
         {
             return;
         }
 
-        if (action.poseEntries != null)
+        foreach (var definition in action.areaDefinitions)
         {
-            foreach (var entry in action.poseEntries)
+            if (definition == null)
             {
-                if (entry?.poseSet == null)
-                {
-                    continue;
-                }
-
-                var key = new PoseKey(entry.area, entry.topOutfit, entry.bottomOutfit);
-                poseLookup[key] = entry.poseSet;
+                continue;
             }
+
+            areaDefinitionLookup[definition.area] = definition;
+        }
+    }
+
+    private ActionAreaDefinition FindAreaDefinition(TouchArea area)
+    {
+        if (areaDefinitionLookup.TryGetValue(area, out var definition))
+        {
+            return definition;
         }
 
-        if (action.areaModes != null)
+        if (currentAction?.fallbackActionArea != null)
         {
-            foreach (var modeEntry in action.areaModes)
-            {
-                if (modeEntry == null)
-                {
-                    continue;
-                }
-
-                areaModeLookup[modeEntry.area] = modeEntry.playMode;
-            }
+            return currentAction.fallbackActionArea;
         }
+
+        return null;
     }
 
     private PoseSet FindPose(TouchArea area)
     {
-        var key = new PoseKey(area, currentTopOutfit, currentBottomOutfit);
-        if (poseLookup.TryGetValue(key, out var pose))
-        {
-            return pose;
-        }
-
-        return currentAction != null ? currentAction.fallbackPose : null;
+        return FindPose(FindAreaDefinition(area));
     }
 
-    private AreaPlayMode GetAreaPlayMode(TouchArea area)
+    private PoseSet FindPose(ActionAreaDefinition definition)
     {
-        if (areaModeLookup.TryGetValue(area, out var mode))
+        if (definition == null)
         {
-            return mode;
+            return currentAction != null ? currentAction.fallbackPose : null;
+        }
+
+        if (definition.poseEntries != null)
+        {
+            foreach (var entry in definition.poseEntries)
+            {
+                if (entry == null || entry.poseSet == null)
+                {
+                    continue;
+                }
+
+                if (entry.topOutfit == currentTopOutfit && entry.bottomOutfit == currentBottomOutfit)
+                {
+                    return entry.poseSet;
+                }
+            }
+        }
+
+        return definition.fallbackPose ?? currentAction?.fallbackPose;
+    }
+
+    private AreaPlayMode ResolvePlayMode(ActionAreaDefinition definition)
+    {
+        if (definition != null && definition.usePlayModeOverride)
+        {
+            return definition.playModeOverride;
         }
 
         return currentAction != null ? currentAction.defaultPlayMode : AreaPlayMode.Both;
+    }
+
+    private Sprite[] GetSlotFrames(PoseSet pose, MenSlot slot)
+    {
+        if (pose == null)
+        {
+            return null;
+        }
+
+        switch (slot)
+        {
+            case MenSlot.Mouth:
+                return pose.manMouthFrames;
+            case MenSlot.RightHand:
+                return pose.manRightHandFrames;
+            case MenSlot.LeftHand:
+                return pose.manLeftHandFrames;
+            case MenSlot.Crotch:
+                return pose.manCrotchFrames;
+            default:
+                return null;
+        }
+    }
+
+    private bool CanRunActionSideEffects()
+    {
+        return currentAction != null && !isStopped && HasAnyActiveSlot();
+    }
+
+    private bool HasAnyActiveSlot()
+    {
+        foreach (var state in slotStates.Values)
+        {
+            if (state.isActive)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool HasAnyAutoRunningSlot()
+    {
+        foreach (var state in slotStates.Values)
+        {
+            if (state.isAutoRunning)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool IsAreaActive(TouchArea area)
+    {
+        foreach (var state in slotStates.Values)
+        {
+            if (state.isActive && state.area == area)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void EnsureRuntimeCoroutines()
+    {
+        StartValueTickerIfNeeded();
+        StartRandomOnomatopoeiaIfNeeded();
     }
 
     private void StopStoppedTransition()
@@ -716,6 +957,12 @@ public class OsawariGameController : MonoBehaviour
     private int SafeLength(Array array)
     {
         return array == null ? 0 : array.Length;
+    }
+
+    private Image GetSlotImage(MenSlot slot)
+    {
+        slotImages.TryGetValue(slot, out var image);
+        return image;
     }
 
     private void PlayOneShot(AudioClip clip, AudioMixerGroup mixerGroup)
@@ -753,6 +1000,24 @@ public class OsawariGameController : MonoBehaviour
         source.Stop();
         source.clip = clip;
         source.Play();
+    }
+
+    private void UpdateActionLoopAudio()
+    {
+        if (currentAction == null)
+        {
+            StopActionLoopAudio();
+            return;
+        }
+
+        if (HasAnyAutoRunningSlot())
+        {
+            PlayLoop(actionLoopAudioSource, currentAction.loopClip, currentAction.audioMixerGroup);
+        }
+        else
+        {
+            StopActionLoopAudio();
+        }
     }
 
     private void StopActionLoopAudio()
@@ -805,6 +1070,14 @@ public enum TouchArea
     Crotch
 }
 
+public enum MenSlot
+{
+    Mouth,
+    RightHand,
+    LeftHand,
+    Crotch
+}
+
 public enum TopOutfit
 {
     Sweater,
@@ -830,7 +1103,10 @@ public enum AreaPlayMode
 public class PoseSet
 {
     public Sprite[] bodyFrames;
-    public Sprite[] manFrames;
+    public Sprite[] manMouthFrames;
+    public Sprite[] manRightHandFrames;
+    public Sprite[] manLeftHandFrames;
+    public Sprite[] manCrotchFrames;
     public Sprite[] subFrames;
     public Sprite faceLevel1;
     public Sprite faceLevel2;
@@ -840,17 +1116,29 @@ public class PoseSet
 [Serializable]
 public class PoseKeyEntry
 {
-    public TouchArea area;
     public TopOutfit topOutfit;
     public BottomOutfit bottomOutfit;
     public PoseSet poseSet;
 }
 
 [Serializable]
-public class AreaPlayModeEntry
+public class ActionAreaDefinition
 {
     public TouchArea area;
-    public AreaPlayMode playMode = AreaPlayMode.Both;
+    public MenSlot usedSlot;
+    public bool exclusiveOnly;
+
+    [Header("Optional Play Mode Override")]
+    public bool usePlayModeOverride;
+    public AreaPlayMode playModeOverride = AreaPlayMode.Both;
+
+    [Header("Optional Auto Interval Override")]
+    public bool useAutoBaseIntervalOverride;
+    public float autoBaseIntervalOverride = 0.5f;
+
+    [Header("Pose Data by Outfit")]
+    public List<PoseKeyEntry> poseEntries = new List<PoseKeyEntry>();
+    public PoseSet fallbackPose;
 }
 
 [Serializable]
@@ -863,12 +1151,11 @@ public class RandomSpriteChannel
 }
 
 [Serializable]
-public class StoppedVisualSet
+public class FaceLevelSet
 {
-    public Sprite bodySprite;
-    public Sprite faceSprite;
-    public Sprite manSprite;
-    public Sprite subSprite;
+    public Sprite level1;
+    public Sprite level2;
+    public Sprite level3;
 
     public AudioClip oneShotClip;
     public AudioClip loopClip;
@@ -881,12 +1168,14 @@ public class ConstantButtonData
     public string actionName;
     public Button button;
 
-    [Header("Play Modes")]
+    [Header("Default Play Mode")]
     public AreaPlayMode defaultPlayMode = AreaPlayMode.Both;
-    public List<AreaPlayModeEntry> areaModes = new List<AreaPlayModeEntry>();
 
-    [Header("Pose Data by Area + Outfit")]
-    public List<PoseKeyEntry> poseEntries = new List<PoseKeyEntry>();
+    [Header("Action Area Definitions")]
+    public List<ActionAreaDefinition> areaDefinitions = new List<ActionAreaDefinition>();
+    public ActionAreaDefinition fallbackActionArea;
+
+    [Header("Fallback Pose")]
     public PoseSet fallbackPose;
 
     [Header("Frame/Auto")]
@@ -902,43 +1191,23 @@ public class ConstantButtonData
     public AudioClip loopClip;
     public AudioMixerGroup audioMixerGroup;
 
+    [Header("Stopped Face by Kando")]
+    public FaceLevelSet stopFaceSet;
+    public FaceLevelSet afterStopFaceSet;
+
     [Header("Optional Random Onomatopoeia")]
     public float randomSpriteInterval = 0.6f;
     public List<RandomSpriteChannel> randomChannels = new List<RandomSpriteChannel>();
 }
 
-public struct PoseKey : IEquatable<PoseKey>
+public class SlotRuntimeState
 {
-    public readonly TouchArea area;
-    public readonly TopOutfit top;
-    public readonly BottomOutfit bottom;
-
-    public PoseKey(TouchArea area, TopOutfit top, BottomOutfit bottom)
-    {
-        this.area = area;
-        this.top = top;
-        this.bottom = bottom;
-    }
-
-    public bool Equals(PoseKey other)
-    {
-        return area == other.area && top == other.top && bottom == other.bottom;
-    }
-
-    public override bool Equals(object obj)
-    {
-        return obj is PoseKey other && Equals(other);
-    }
-
-    public override int GetHashCode()
-    {
-        unchecked
-        {
-            int hash = 17;
-            hash = (hash * 31) + (int)area;
-            hash = (hash * 31) + (int)top;
-            hash = (hash * 31) + (int)bottom;
-            return hash;
-        }
-    }
+    public bool isActive;
+    public TouchArea area;
+    public AreaPlayMode mode;
+    public int frameIndex;
+    public bool isAutoRunning;
+    public bool isForcedAuto;
+    public Coroutine autoCoroutine;
+    public PoseSet pose;
 }
