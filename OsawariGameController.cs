@@ -872,7 +872,7 @@ public class OsawariGameController : MonoBehaviour
 
     private void RefreshSpeedDebug()
     {
-        float sliderValue = speedSlider != null ? speedSlider.value : GetSpeedMultiplier();
+        float sliderValue = speedSlider != null ? speedSlider.value : 0f;
         debugSpeedSliderValue = sliderValue;
         debugSpeedMultiplier = GetSpeedMultiplier();
 
@@ -1089,22 +1089,15 @@ public class OsawariGameController : MonoBehaviour
 
     private bool IsTopUndressArea(TouchArea area)
     {
-        if (currentTopOutfit != TopOutfit.Sweater && currentTopOutfit != TopOutfit.Bra)
-        {
-            return false;
-        }
-
-        return area == TouchArea.RightBreast || area == TouchArea.LeftBreast;
+        bool canAdvanceTopOutfit = currentTopOutfit == TopOutfit.Sweater || currentTopOutfit == TopOutfit.Bra;
+        bool isTopArea = area == TouchArea.RightBreast || area == TouchArea.LeftBreast;
+        return canAdvanceTopOutfit && isTopArea;
     }
 
     private bool IsBottomUndressArea(TouchArea area)
     {
-        if (currentBottomOutfit != BottomOutfit.Skirt && currentBottomOutfit != BottomOutfit.Panties)
-        {
-            return false;
-        }
-
-        return area == TouchArea.Crotch;
+        bool canAdvanceBottomOutfit = currentBottomOutfit == BottomOutfit.Skirt || currentBottomOutfit == BottomOutfit.Panties;
+        return canAdvanceBottomOutfit && area == TouchArea.Crotch;
     }
 
     private bool TryAdvanceTopOutfit()
@@ -1162,6 +1155,7 @@ public class OsawariGameController : MonoBehaviour
     {
         yield return new WaitForSeconds(Mathf.Max(0f, outfitChangeDurationSeconds));
 
+        // Stop/reset increments outfitChangeToken so only the latest pause request is allowed to resume.
         if (token != outfitChangeToken || isStopped)
         {
             yield break;
