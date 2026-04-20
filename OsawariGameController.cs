@@ -411,14 +411,9 @@ public class OsawariGameController : MonoBehaviour
 
     private IEnumerator AutoFrameCoroutine(MenSlot slot)
     {
-        while (true)
+        while (slotStates[slot].isAutoRunning)
         {
             SlotRuntimeState state = slotStates[slot];
-            if (!state.isAutoRunning)
-            {
-                yield break;
-            }
-
             yield return new WaitForSeconds(GetAutoInterval(state.area));
 
             state = slotStates[slot];
@@ -733,14 +728,8 @@ public class OsawariGameController : MonoBehaviour
 
     private IEnumerator RandomOnomatopoeiaCoroutine()
     {
-        while (true)
+        while (CanRunActionSideEffects())
         {
-            if (!CanRunActionSideEffects())
-            {
-                yield return null;
-                continue;
-            }
-
             ConstantButtonData activeAction = currentAction;
             foreach (var channel in activeAction.randomChannels)
             {
@@ -761,6 +750,8 @@ public class OsawariGameController : MonoBehaviour
 
             yield return new WaitForSeconds(activeAction.randomSpriteInterval);
         }
+
+        randomOnomatopoeiaCoroutine = null;
     }
 
     private void BuildActionLookup(ConstantButtonData action)
