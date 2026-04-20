@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Audio;
+using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
 public class OsawariGameController : MonoBehaviour
@@ -45,7 +46,6 @@ public class OsawariGameController : MonoBehaviour
 
     [Header("Status Values")]
     public float kandoValue;
-    // Minimal scaffold for upcoming game logic; currently updated per-action in ValueTickCoroutine.
     public float excitementValue;
     public float minValue = 0f;
     public float maxValue = 100f;
@@ -63,6 +63,34 @@ public class OsawariGameController : MonoBehaviour
     public Sprite autoOffSprite;
     public Sprite autoOnSprite;
 
+    [Header("Conversation UI")]
+    public Image conversationMaleImage;
+    public Image conversationFemaleImage;
+
+    [Header("Opening Conversation")]
+    public ConversationSequence openingConversation;
+
+    [Header("Area Conversations (one-time by action+area)")]
+    public List<AreaConversationData> areaConversations = new List<AreaConversationData>();
+
+    [Header("Single-use Conversations")]
+    public List<SingleUseButtonData> singleUseButtons = new List<SingleUseButtonData>();
+
+    [Header("Next Scene")]
+    public Button nextSceneButton;
+    public NextSceneData nextSceneData;
+
+    [Header("Outfit Drag Unlocks")]
+    public float undressDragThresholdPixels = 30f;
+    public float outfitChangeDurationSeconds = 1f;
+    public AudioClip outfitChangeClip;
+    public AudioMixerGroup outfitChangeMixerGroup;
+
+    [Header("Realtime Speed Debug")]
+    public float debugSpeedSliderValue;
+    public float debugSpeedMultiplier = 1f;
+    public float debugEffectiveAutoInterval;
+
     private ConstantButtonData currentAction;
     private TouchArea? currentArea;
     private bool autoToggleOn;
@@ -76,6 +104,29 @@ public class OsawariGameController : MonoBehaviour
 
     private AudioSource sfxAudioSource;
     private AudioSource stoppedLoopAudioSource;
+
+    private bool isGameplayInputLocked;
+    private bool isGameplayConversationActive;
+    private bool isOutfitChangePauseActive;
+
+    private bool topDragUnlocked;
+    private bool bottomDragUnlocked;
+
+    private Coroutine gameplayConversationCoroutine;
+    private int gameplayConversationToken;
+
+    private Coroutine lockedConversationCoroutine;
+
+    private Coroutine outfitChangePauseCoroutine;
+    private int outfitChangePauseToken;
+    private readonly Dictionary<MenSlot, AutoResumeState> outfitPauseResumeStates = new Dictionary<MenSlot, AutoResumeState>();
+
+    private TouchArea? dragStartArea;
+    private Vector2 dragStartPosition;
+    private bool isDragTracking;
+
+    private readonly HashSet<AreaConversationKey> playedAreaConversations = new HashSet<AreaConversationKey>();
+    private readonly HashSet<SingleUseButtonData> usedSingleUseButtons = new HashSet<SingleUseButtonData>();
 
     private void Awake()
     {
@@ -98,6 +149,16 @@ public class OsawariGameController : MonoBehaviour
         if (backgroundChangeButton != null)
         {
             backgroundChangeButton.onClick.AddListener(HandleBackgroundChangeButton);
+        }
+
+        if (speedSlider != null)
+        {
+            speedSlider.onValueChanged.AddListener(HandleSpeedSliderValueChanged);
+        }
+
+        if (nextSceneButton != null)
+        {
+            nextSceneButton.onClick.AddListener(HandleNextSceneButton);
         }
 
         if (faceAreaButton != null)
@@ -131,15 +192,39 @@ public class OsawariGameController : MonoBehaviour
             capturedAction.button.onClick.AddListener(() => HandleConstantActionClick(capturedAction));
         }
 
+        foreach (var buttonData in singleUseButtons)
+        {
+            if (buttonData?.button == null)
+            {
+                continue;
+            }
+
+            SingleUseButtonData capturedData = buttonData;
+            capturedData.button.onClick.AddListener(() => HandleSingleUseButton(capturedData));
+        }
+
         InitializeSlotStates();
         HideAllMenSlotImages();
+        HideConversationImages();
         UpdateAutoToggleIndicator();
         ApplyBackground();
+        RefreshSpeedDebugInfo();
+        UpdateInputInteractableState();
+    }
+
+    private void Start()
+    {
+        TryStartOpeningConversation();
     }
 
     // Inspector helper: assign this from each touch-area button if you prefer explicit event wiring.
     public void HandleAreaClick(TouchArea area)
     {
+        if (IsGameplayInputBlocked())
+        {
+            return;
+        }
+
         if (currentAction == null)
         {
             return;
@@ -155,10 +240,16 @@ public class OsawariGameController : MonoBehaviour
         ApplyPose();
         StartValueTickerIfNeeded();
         StartRandomOnomatopoeiaIfNeeded();
+        TryPlayAreaConversation(currentAction, area);
     }
 
     public void HandleConstantActionClick(ConstantButtonData action)
     {
+        if (IsGameplayInputBlocked())
+        {
+            return;
+        }
+
         if (action == null)
         {
             return;
@@ -183,11 +274,17 @@ public class OsawariGameController : MonoBehaviour
         {
             StartValueTickerIfNeeded();
             StartRandomOnomatopoeiaIfNeeded();
+            RefreshSpeedDebugInfo();
         }
     }
 
     public void HandleAutoToggleButton()
     {
+        if (IsGameplayInputBlocked())
+        {
+            return;
+        }
+
         autoToggleOn = !autoToggleOn;
         UpdateAutoToggleIndicator();
 
@@ -209,11 +306,23 @@ public class OsawariGameController : MonoBehaviour
 
     public void HandleStopActionButton()
     {
+        if (isGameplayInputLocked)
+        {
+            return;
+        }
+
+        StopGameplayConversation();
+        CancelOutfitChangePause(true);
         EnterStoppedState();
     }
 
     public void HandleBackgroundChangeButton()
     {
+        if (IsGameplayInputBlocked())
+        {
+            return;
+        }
+
         if (backgrounds == null || backgrounds.Count == 0)
         {
             Debug.LogWarning("Background change requested but no backgrounds are assigned.");
@@ -222,6 +331,100 @@ public class OsawariGameController : MonoBehaviour
 
         backgroundIndex = (backgroundIndex + 1) % backgrounds.Count;
         ApplyBackground();
+    }
+
+    public void HandleNextSceneButton()
+    {
+        if (IsGameplayInputBlocked())
+        {
+            return;
+        }
+
+        if (lockedConversationCoroutine != null)
+        {
+            return;
+        }
+
+        lockedConversationCoroutine = StartCoroutine(NextSceneFlowCoroutine());
+    }
+
+    public void HandleSingleUseButton(SingleUseButtonData buttonData)
+    {
+        if (IsGameplayInputBlocked())
+        {
+            return;
+        }
+
+        if (buttonData == null || buttonData.button == null || usedSingleUseButtons.Contains(buttonData))
+        {
+            return;
+        }
+
+        if (isStopped)
+        {
+            ExitStoppedState();
+        }
+
+        StartGameplayConversation(buttonData.conversation, () =>
+        {
+            usedSingleUseButtons.Add(buttonData);
+
+            if (buttonData.disableAfterUse && buttonData.button != null)
+            {
+                buttonData.button.interactable = false;
+                if (buttonData.hideAfterUse)
+                {
+                    buttonData.button.gameObject.SetActive(false);
+                }
+            }
+
+            if (buttonData.unlockOnComplete)
+            {
+                ApplyUnlock(buttonData.unlockType);
+            }
+        });
+    }
+
+    public void NotifyPointerDown(TouchArea area, Vector2 screenPosition)
+    {
+        if (IsGameplayInputBlocked())
+        {
+            return;
+        }
+
+        dragStartArea = area;
+        dragStartPosition = screenPosition;
+        isDragTracking = true;
+    }
+
+    public void NotifyPointerDrag(Vector2 screenPosition)
+    {
+        if (!isDragTracking || !dragStartArea.HasValue || IsGameplayInputBlocked())
+        {
+            return;
+        }
+
+        TouchArea area = dragStartArea.Value;
+        if (!CanUndressFromArea(area))
+        {
+            return;
+        }
+
+        float dragDistance = Vector2.Distance(dragStartPosition, screenPosition);
+        if (dragDistance < undressDragThresholdPixels)
+        {
+            return;
+        }
+
+        TryUndress(area);
+        dragStartArea = null;
+        isDragTracking = false;
+    }
+
+    public void NotifyPointerUp()
+    {
+        dragStartArea = null;
+        isDragTracking = false;
     }
 
     // Optional hook for dialogue/event systems.
@@ -235,9 +438,385 @@ public class OsawariGameController : MonoBehaviour
         backgroundImage.sprite = sprite;
     }
 
+    private bool IsGameplayInputBlocked()
+    {
+        return isGameplayInputLocked || isGameplayConversationActive || isOutfitChangePauseActive;
+    }
+
+    private void TryStartOpeningConversation()
+    {
+        if (openingConversation == null || !openingConversation.HasTurns)
+        {
+            return;
+        }
+
+        if (lockedConversationCoroutine != null)
+        {
+            StopCoroutine(lockedConversationCoroutine);
+        }
+
+        lockedConversationCoroutine = StartCoroutine(OpeningConversationCoroutine());
+    }
+
+    private IEnumerator OpeningConversationCoroutine()
+    {
+        SetGameplayInputLock(true);
+        yield return PlayConversationSequence(openingConversation);
+        SetGameplayInputLock(false);
+        lockedConversationCoroutine = null;
+    }
+
+    private IEnumerator NextSceneFlowCoroutine()
+    {
+        SetGameplayInputLock(true);
+
+        if (nextSceneData != null && nextSceneData.conversation != null && nextSceneData.conversation.HasTurns)
+        {
+            yield return PlayConversationSequence(nextSceneData.conversation);
+        }
+
+        string sceneName = nextSceneData != null ? nextSceneData.sceneName : null;
+        if (!string.IsNullOrWhiteSpace(sceneName))
+        {
+            SceneManager.LoadScene(sceneName);
+            yield break;
+        }
+
+        SetGameplayInputLock(false);
+        lockedConversationCoroutine = null;
+    }
+
+    private void TryPlayAreaConversation(ConstantButtonData action, TouchArea area)
+    {
+        if (action == null || areaConversations == null || areaConversations.Count == 0)
+        {
+            return;
+        }
+
+        AreaConversationData data = null;
+        for (int i = 0; i < areaConversations.Count; i++)
+        {
+            AreaConversationData candidate = areaConversations[i];
+            if (candidate == null)
+            {
+                continue;
+            }
+
+            if (candidate.action == action && candidate.area == area)
+            {
+                data = candidate;
+                break;
+            }
+        }
+
+        if (data == null || data.conversation == null || !data.conversation.HasTurns)
+        {
+            return;
+        }
+
+        AreaConversationKey key = new AreaConversationKey(action, area);
+        if (!playedAreaConversations.Add(key))
+        {
+            return;
+        }
+
+        StartGameplayConversation(data.conversation, null);
+    }
+
+    private void StartGameplayConversation(ConversationSequence conversation, Action onComplete)
+    {
+        StopGameplayConversation();
+
+        if (conversation == null || !conversation.HasTurns)
+        {
+            onComplete?.Invoke();
+            return;
+        }
+
+        isGameplayConversationActive = true;
+        UpdateInputInteractableState();
+
+        gameplayConversationToken++;
+        int token = gameplayConversationToken;
+        gameplayConversationCoroutine = StartCoroutine(GameplayConversationCoroutine(conversation, onComplete, token));
+    }
+
+    private IEnumerator GameplayConversationCoroutine(ConversationSequence conversation, Action onComplete, int token)
+    {
+        yield return PlayConversationSequence(conversation, () => token != gameplayConversationToken);
+
+        if (token != gameplayConversationToken)
+        {
+            yield break;
+        }
+
+        gameplayConversationCoroutine = null;
+        isGameplayConversationActive = false;
+        UpdateInputInteractableState();
+        onComplete?.Invoke();
+    }
+
+    private void StopGameplayConversation()
+    {
+        if (!isGameplayConversationActive && gameplayConversationCoroutine == null)
+        {
+            HideConversationImages();
+            return;
+        }
+
+        gameplayConversationToken++;
+
+        if (gameplayConversationCoroutine != null)
+        {
+            StopCoroutine(gameplayConversationCoroutine);
+            gameplayConversationCoroutine = null;
+        }
+
+        isGameplayConversationActive = false;
+        HideConversationImages();
+        UpdateInputInteractableState();
+    }
+
+    private IEnumerator PlayConversationSequence(ConversationSequence sequence, Func<bool> shouldCancel = null)
+    {
+        HideConversationImages();
+
+        if (sequence == null || sequence.turns == null)
+        {
+            yield break;
+        }
+
+        for (int i = 0; i < sequence.turns.Count; i++)
+        {
+            if (shouldCancel != null && shouldCancel())
+            {
+                HideConversationImages();
+                yield break;
+            }
+
+            ConversationTurn turn = sequence.turns[i];
+            if (turn == null)
+            {
+                continue;
+            }
+
+            ShowConversationTurn(turn);
+            PlayOneShot(turn.audioClip, turn.audioMixerGroup);
+
+            float duration = Mathf.Max(0.01f, turn.durationSeconds);
+            yield return new WaitForSeconds(duration);
+        }
+
+        HideConversationImages();
+    }
+
+    private void ShowConversationTurn(ConversationTurn turn)
+    {
+        bool showMale = turn.speaker == ConversationSpeaker.Male;
+
+        if (conversationMaleImage != null)
+        {
+            conversationMaleImage.sprite = showMale ? turn.sprite : null;
+            conversationMaleImage.gameObject.SetActive(showMale && turn.sprite != null);
+        }
+
+        if (conversationFemaleImage != null)
+        {
+            conversationFemaleImage.sprite = showMale ? null : turn.sprite;
+            conversationFemaleImage.gameObject.SetActive(!showMale && turn.sprite != null);
+        }
+    }
+
+    private void HideConversationImages()
+    {
+        if (conversationMaleImage != null)
+        {
+            conversationMaleImage.sprite = null;
+            conversationMaleImage.gameObject.SetActive(false);
+        }
+
+        if (conversationFemaleImage != null)
+        {
+            conversationFemaleImage.sprite = null;
+            conversationFemaleImage.gameObject.SetActive(false);
+        }
+    }
+
+    private void ApplyUnlock(UnlockType unlockType)
+    {
+        switch (unlockType)
+        {
+            case UnlockType.TopDrag:
+                topDragUnlocked = true;
+                break;
+            case UnlockType.BottomDrag:
+                bottomDragUnlocked = true;
+                break;
+            case UnlockType.Both:
+                topDragUnlocked = true;
+                bottomDragUnlocked = true;
+                break;
+        }
+    }
+
+    private bool CanUndressFromArea(TouchArea area)
+    {
+        if (topDragUnlocked && (area == TouchArea.LeftBreast || area == TouchArea.RightBreast))
+        {
+            return true;
+        }
+
+        if (bottomDragUnlocked && area == TouchArea.Crotch)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private void TryUndress(TouchArea area)
+    {
+        bool changed = false;
+
+        if (topDragUnlocked && (area == TouchArea.LeftBreast || area == TouchArea.RightBreast))
+        {
+            changed = TryAdvanceTopOutfit();
+        }
+        else if (bottomDragUnlocked && area == TouchArea.Crotch)
+        {
+            changed = TryAdvanceBottomOutfit();
+        }
+
+        if (!changed)
+        {
+            return;
+        }
+
+        ApplyPose();
+        PlayOneShot(outfitChangeClip, outfitChangeMixerGroup);
+        BeginOutfitChangePause();
+    }
+
+    private bool TryAdvanceTopOutfit()
+    {
+        switch (currentTopOutfit)
+        {
+            case TopOutfit.Sweater:
+                currentTopOutfit = TopOutfit.Bra;
+                return true;
+            case TopOutfit.Bra:
+                currentTopOutfit = TopOutfit.Topless;
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private bool TryAdvanceBottomOutfit()
+    {
+        switch (currentBottomOutfit)
+        {
+            case BottomOutfit.Skirt:
+                currentBottomOutfit = BottomOutfit.Panties;
+                return true;
+            case BottomOutfit.Panties:
+                currentBottomOutfit = BottomOutfit.Nude;
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private void BeginOutfitChangePause()
+    {
+        CancelOutfitChangePause(true);
+
+        outfitPauseResumeStates.Clear();
+        foreach (var pair in slotStates)
+        {
+            SlotRuntimeState state = pair.Value;
+            outfitPauseResumeStates[pair.Key] = new AutoResumeState
+            {
+                shouldResume = state.isAutoRunning,
+                forced = state.isForcedAuto
+            };
+
+            if (state.isAutoRunning)
+            {
+                StopSlotAuto(pair.Key, false);
+            }
+        }
+
+        HideAllMenSlotImages();
+
+        isOutfitChangePauseActive = true;
+        UpdateInputInteractableState();
+
+        outfitChangePauseToken++;
+        int token = outfitChangePauseToken;
+        outfitChangePauseCoroutine = StartCoroutine(OutfitChangePauseCoroutine(token));
+    }
+
+    private IEnumerator OutfitChangePauseCoroutine(int token)
+    {
+        float wait = Mathf.Max(0f, outfitChangeDurationSeconds);
+        if (wait > 0f)
+        {
+            yield return new WaitForSeconds(wait);
+        }
+
+        if (token != outfitChangePauseToken)
+        {
+            yield break;
+        }
+
+        outfitChangePauseCoroutine = null;
+        isOutfitChangePauseActive = false;
+
+        foreach (var pair in outfitPauseResumeStates)
+        {
+            if (!pair.Value.shouldResume)
+            {
+                continue;
+            }
+
+            MenSlot slot = pair.Key;
+            SlotRuntimeState state = slotStates[slot];
+            if (!state.isActive || state.action == null || !state.area.HasValue)
+            {
+                continue;
+            }
+
+            StartSlotAuto(slot, state.action, pair.Value.forced);
+        }
+
+        outfitPauseResumeStates.Clear();
+        ApplyPose();
+        UpdateInputInteractableState();
+    }
+
+    private void CancelOutfitChangePause(bool preventResume)
+    {
+        if (preventResume)
+        {
+            outfitChangePauseToken++;
+        }
+
+        if (outfitChangePauseCoroutine != null)
+        {
+            StopCoroutine(outfitChangePauseCoroutine);
+            outfitChangePauseCoroutine = null;
+        }
+
+        outfitPauseResumeStates.Clear();
+        isOutfitChangePauseActive = false;
+        UpdateInputInteractableState();
+    }
+
     private void EnterStoppedState()
     {
         isStopped = true;
+        NotifyPointerUp();
         StopAllSlots();
         StopValueTicker();
         StopRandomOnomatopoeia();
@@ -315,7 +894,11 @@ public class OsawariGameController : MonoBehaviour
         ApplyFrameToImage(bodyImage, SelectFrame(pose.bodyFrames, displayFrameIndex));
         ApplyFrameToImage(subImage, SelectFrame(pose.subFrames, displayFrameIndex));
         ApplyFrameToImage(faceImage, SelectFaceByKando(pose));
-        ApplyAllSlotMenImages();
+
+        if (!isOutfitChangePauseActive)
+        {
+            ApplyAllSlotMenImages();
+        }
     }
 
     private void ApplyBackground()
@@ -908,6 +1491,113 @@ public class OsawariGameController : MonoBehaviour
         stoppedLoopAudioSource.clip = null;
     }
 
+    private void HandleSpeedSliderValueChanged(float _)
+    {
+        if (isGameplayInputLocked)
+        {
+            if (speedSlider != null)
+            {
+                speedSlider.SetValueWithoutNotify(debugSpeedSliderValue);
+            }
+
+            return;
+        }
+
+        RefreshSpeedDebugInfo();
+    }
+
+    private void RefreshSpeedDebugInfo()
+    {
+        float sliderValue = speedSlider != null ? speedSlider.value : 1f;
+        debugSpeedSliderValue = sliderValue;
+        debugSpeedMultiplier = Mathf.Max(0.01f, sliderValue);
+
+        float autoBaseInterval = fallbackAutoBaseInterval;
+        if (currentAction != null && currentAction.autoBaseInterval > 0f)
+        {
+            autoBaseInterval = currentAction.autoBaseInterval;
+        }
+
+        debugEffectiveAutoInterval = autoBaseInterval / debugSpeedMultiplier;
+    }
+
+    private void SetGameplayInputLock(bool isLocked)
+    {
+        isGameplayInputLocked = isLocked;
+        UpdateInputInteractableState();
+    }
+
+    private void UpdateInputInteractableState()
+    {
+        bool gameplayEnabled = !IsGameplayInputBlocked();
+
+        if (faceAreaButton != null)
+        {
+            faceAreaButton.interactable = gameplayEnabled;
+        }
+
+        if (rightBreastAreaButton != null)
+        {
+            rightBreastAreaButton.interactable = gameplayEnabled;
+        }
+
+        if (leftBreastAreaButton != null)
+        {
+            leftBreastAreaButton.interactable = gameplayEnabled;
+        }
+
+        if (crotchAreaButton != null)
+        {
+            crotchAreaButton.interactable = gameplayEnabled;
+        }
+
+        if (autoToggleButton != null)
+        {
+            autoToggleButton.interactable = gameplayEnabled;
+        }
+
+        if (backgroundChangeButton != null)
+        {
+            backgroundChangeButton.interactable = gameplayEnabled;
+        }
+
+        if (speedSlider != null)
+        {
+            speedSlider.interactable = gameplayEnabled;
+        }
+
+        if (nextSceneButton != null)
+        {
+            nextSceneButton.interactable = gameplayEnabled;
+        }
+
+        foreach (var action in constantButtons)
+        {
+            if (action?.button == null)
+            {
+                continue;
+            }
+
+            action.button.interactable = gameplayEnabled;
+        }
+
+        foreach (var singleUse in singleUseButtons)
+        {
+            if (singleUse?.button == null)
+            {
+                continue;
+            }
+
+            bool isUsed = usedSingleUseButtons.Contains(singleUse);
+            singleUse.button.interactable = gameplayEnabled && !isUsed;
+        }
+
+        if (stopActionButton != null)
+        {
+            stopActionButton.interactable = !isGameplayInputLocked;
+        }
+    }
+
     private class SlotRuntimeState
     {
         public ConstantButtonData action;
@@ -917,6 +1607,45 @@ public class OsawariGameController : MonoBehaviour
         public bool isAutoRunning;
         public bool isForcedAuto;
         public Coroutine autoCoroutine;
+    }
+
+    private struct AutoResumeState
+    {
+        public bool shouldResume;
+        public bool forced;
+    }
+
+    private readonly struct AreaConversationKey : IEquatable<AreaConversationKey>
+    {
+        public readonly ConstantButtonData action;
+        public readonly TouchArea area;
+
+        public AreaConversationKey(ConstantButtonData action, TouchArea area)
+        {
+            this.action = action;
+            this.area = area;
+        }
+
+        public bool Equals(AreaConversationKey other)
+        {
+            return action == other.action && area == other.area;
+        }
+
+        public override bool Equals(object obj)
+        {
+            return obj is AreaConversationKey other && Equals(other);
+        }
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                int hash = 17;
+                hash = (hash * 31) + (action != null ? action.GetHashCode() : 0);
+                hash = (hash * 31) + (int)area;
+                return hash;
+            }
+        }
     }
 
     private void UpdateAutoToggleIndicator()
@@ -974,6 +1703,20 @@ public enum MenSlot
     RightHand,
     LeftHand,
     Crotch
+}
+
+public enum ConversationSpeaker
+{
+    Male,
+    Female
+}
+
+public enum UnlockType
+{
+    None,
+    TopDrag,
+    BottomDrag,
+    Both
 }
 
 [Serializable]
@@ -1067,6 +1810,53 @@ public class ConstantButtonData
     [Header("Optional Random Onomatopoeia")]
     public float randomSpriteInterval = 0.6f;
     public List<RandomSpriteChannel> randomChannels = new List<RandomSpriteChannel>();
+}
+
+[Serializable]
+public class ConversationTurn
+{
+    public ConversationSpeaker speaker;
+    public Sprite sprite;
+    public float durationSeconds = 1f;
+    public AudioClip audioClip;
+    public AudioMixerGroup audioMixerGroup;
+}
+
+[Serializable]
+public class ConversationSequence
+{
+    public List<ConversationTurn> turns = new List<ConversationTurn>();
+
+    public bool HasTurns
+    {
+        get { return turns != null && turns.Count > 0; }
+    }
+}
+
+[Serializable]
+public class AreaConversationData
+{
+    public ConstantButtonData action;
+    public TouchArea area;
+    public ConversationSequence conversation;
+}
+
+[Serializable]
+public class SingleUseButtonData
+{
+    public Button button;
+    public ConversationSequence conversation;
+    public bool unlockOnComplete;
+    public UnlockType unlockType = UnlockType.None;
+    public bool disableAfterUse = true;
+    public bool hideAfterUse = true;
+}
+
+[Serializable]
+public class NextSceneData
+{
+    public string sceneName;
+    public ConversationSequence conversation;
 }
 
 public struct PoseKey : IEquatable<PoseKey>
