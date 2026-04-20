@@ -29,6 +29,23 @@ public class OsawariGameController : MonoBehaviour
     public Button backgroundChangeButton;
     public Slider speedSlider;
 
+    [Header("Single-use Conversations")]
+    public List<SingleUseButtonData> singleUseButtons = new List<SingleUseButtonData>();
+    public Image conversationMaleImage;
+    public Image conversationFemaleImage;
+
+    [Header("Outfit Drag Unlocks")]
+    public float undressDragThresholdPixels = 40f;
+    public float outfitChangeDurationSeconds = 1f;
+    public AudioClip outfitChangeClip;
+    public AudioMixerGroup outfitChangeMixerGroup;
+    public List<Image> menSlotImages = new List<Image>();
+
+    [Header("Realtime Speed Debug (Play Mode)")]
+    public float debugSpeedSliderValue;
+    public float debugSpeedMultiplier;
+    public float debugEffectiveAutoInterval;
+
     [Header("Backgrounds")]
     public List<Sprite> backgrounds = new List<Sprite>();
 
@@ -76,7 +93,19 @@ public class OsawariGameController : MonoBehaviour
     private Coroutine valueCoroutine;
     private Coroutine stopTransitionCoroutine;
     private Coroutine randomOnomatopoeiaCoroutine;
+    private Coroutine currentSingleUseConversationCoroutine;
+    private Coroutine outfitChangePauseCoroutine;
     private int stopTransitionToken;
+    private int outfitChangeToken;
+
+    private bool topDragUnlocked;
+    private bool bottomDragUnlocked;
+    private bool isOutfitChangePause;
+    private bool isPointerDownActive;
+    private bool isUndressTriggeredForCurrentPointer;
+    private bool suppressNextAreaClick;
+    private TouchArea pointerDownArea;
+    private Vector2 pointerDownPosition;
 
     private AudioSource sfxAudioSource;
     private AudioSource actionLoopAudioSource;
@@ -107,6 +136,11 @@ public class OsawariGameController : MonoBehaviour
         if (backgroundChangeButton != null)
         {
             backgroundChangeButton.onClick.AddListener(HandleBackgroundChangeButton);
+        }
+
+        if (speedSlider != null)
+        {
+            speedSlider.onValueChanged.AddListener(HandleSpeedSliderChanged);
         }
 
         if (faceAreaButton != null)
@@ -140,13 +174,37 @@ public class OsawariGameController : MonoBehaviour
             capturedAction.button.onClick.AddListener(() => HandleConstantActionClick(capturedAction));
         }
 
+        foreach (var singleUseButton in singleUseButtons)
+        {
+            if (singleUseButton?.button == null)
+            {
+                continue;
+            }
+
+            SingleUseButtonData capturedButtonData = singleUseButton;
+            capturedButtonData.button.onClick.AddListener(() => HandleSingleUseButton(capturedButtonData));
+        }
+
         UpdateAutoToggleIndicator();
         ApplyBackground();
+        HideConversationImages();
+        RefreshSpeedDebug();
     }
 
     // Inspector helper: assign this from each touch-area button if you prefer explicit event wiring.
     public void HandleAreaClick(TouchArea area)
     {
+        if (isOutfitChangePause)
+        {
+            return;
+        }
+
+        if (suppressNextAreaClick)
+        {
+            suppressNextAreaClick = false;
+            return;
+        }
+
         if (currentAction == null)
         {
             return;
@@ -211,6 +269,11 @@ public class OsawariGameController : MonoBehaviour
 
     public void HandleConstantActionClick(ConstantButtonData action)
     {
+        if (isOutfitChangePause)
+        {
+            return;
+        }
+
         if (action == null)
         {
             return;
@@ -250,6 +313,8 @@ public class OsawariGameController : MonoBehaviour
             StartValueTickerIfNeeded();
             StartRandomOnomatopoeiaIfNeeded();
         }
+
+        RefreshSpeedDebug();
     }
 
     public void HandleAutoToggleButton()
@@ -265,6 +330,9 @@ public class OsawariGameController : MonoBehaviour
 
     public void HandleStopActionButton()
     {
+        StopSingleUseConversation();
+        HideConversationImages();
+        CancelOutfitChangePause();
         EnterStoppedState();
     }
 
@@ -411,19 +479,11 @@ public class OsawariGameController : MonoBehaviour
 
     private float GetAutoInterval()
     {
-        float baseInterval = fallbackAutoBaseInterval;
-        if (currentAction != null && currentAction.autoBaseInterval > 0f)
-        {
-            baseInterval = currentAction.autoBaseInterval;
-        }
-
-        float speedMultiplier = 1f;
-        if (speedSlider != null)
-        {
-            speedMultiplier = Mathf.Max(0.01f, speedSlider.value);
-        }
-
-        return baseInterval / speedMultiplier;
+        float baseInterval = GetCurrentAutoBaseInterval();
+        float speedMultiplier = GetSpeedMultiplier();
+        float interval = baseInterval / speedMultiplier;
+        debugEffectiveAutoInterval = interval;
+        return interval;
     }
 
     private void AdvanceFrameAndApply()
@@ -456,6 +516,11 @@ public class OsawariGameController : MonoBehaviour
         if (pose == null)
         {
             return;
+        }
+
+        if (!isOutfitChangePause)
+        {
+            SetMenSlotImagesVisible(true);
         }
 
         ApplyFrameToImage(bodyImage, SelectFrame(pose.bodyFrames, currentFrameIndex));
@@ -795,6 +860,343 @@ public class OsawariGameController : MonoBehaviour
             autoToggleIndicator.sprite = autoOffSprite;
         }
     }
+
+    private void HandleSpeedSliderChanged(float _)
+    {
+        RefreshSpeedDebug();
+    }
+
+    private void RefreshSpeedDebug()
+    {
+        float sliderValue = speedSlider != null ? speedSlider.value : 0f;
+        debugSpeedSliderValue = sliderValue;
+        debugSpeedMultiplier = GetSpeedMultiplier();
+
+        float baseInterval = GetCurrentAutoBaseInterval();
+        debugEffectiveAutoInterval = baseInterval / debugSpeedMultiplier;
+    }
+
+    private float GetCurrentAutoBaseInterval()
+    {
+        if (currentAction != null && currentAction.autoBaseInterval > 0f)
+        {
+            return currentAction.autoBaseInterval;
+        }
+
+        return fallbackAutoBaseInterval;
+    }
+
+    private float GetSpeedMultiplier()
+    {
+        if (speedSlider == null)
+        {
+            return 1f;
+        }
+
+        return Mathf.Max(0.01f, speedSlider.value);
+    }
+
+    private void HandleSingleUseButton(SingleUseButtonData buttonData)
+    {
+        if (buttonData == null || buttonData.button == null)
+        {
+            return;
+        }
+
+        StopSingleUseConversation();
+        HideConversationImages();
+        buttonData.button.interactable = false;
+        currentSingleUseConversationCoroutine = StartCoroutine(PlaySingleUseConversationCoroutine(buttonData));
+    }
+
+    private IEnumerator PlaySingleUseConversationCoroutine(SingleUseButtonData buttonData)
+    {
+        if (buttonData.turns == null || buttonData.turns.Count == 0)
+        {
+            CompleteSingleUseConversation(buttonData);
+            yield break;
+        }
+
+        for (int i = 0; i < buttonData.turns.Count; i++)
+        {
+            ConversationTurn turn = buttonData.turns[i];
+            if (turn == null || turn.sprite == null)
+            {
+                continue;
+            }
+
+            ShowConversationTurn(turn);
+            PlayOneShot(turn.audioClip, turn.audioMixerGroup);
+            float duration = Mathf.Max(0f, turn.durationSeconds);
+            if (duration > 0f)
+            {
+                yield return new WaitForSeconds(duration);
+            }
+            else
+            {
+                yield return null;
+            }
+        }
+
+        CompleteSingleUseConversation(buttonData);
+    }
+
+    private void CompleteSingleUseConversation(SingleUseButtonData buttonData)
+    {
+        if (buttonData != null && buttonData.unlockOnComplete)
+        {
+            if (buttonData.unlockType == SingleUseUnlockType.TopDrag)
+            {
+                topDragUnlocked = true;
+            }
+            else if (buttonData.unlockType == SingleUseUnlockType.BottomDrag)
+            {
+                bottomDragUnlocked = true;
+            }
+        }
+
+        currentSingleUseConversationCoroutine = null;
+        HideConversationImages();
+    }
+
+    private void StopSingleUseConversation()
+    {
+        if (currentSingleUseConversationCoroutine != null)
+        {
+            StopCoroutine(currentSingleUseConversationCoroutine);
+            currentSingleUseConversationCoroutine = null;
+        }
+    }
+
+    private void ShowConversationTurn(ConversationTurn turn)
+    {
+        if (turn.speaker == ConversationSpeaker.Male)
+        {
+            if (conversationMaleImage != null)
+            {
+                conversationMaleImage.gameObject.SetActive(true);
+                conversationMaleImage.sprite = turn.sprite;
+            }
+
+            if (conversationFemaleImage != null)
+            {
+                conversationFemaleImage.gameObject.SetActive(false);
+            }
+
+            return;
+        }
+
+        if (conversationFemaleImage != null)
+        {
+            conversationFemaleImage.gameObject.SetActive(true);
+            conversationFemaleImage.sprite = turn.sprite;
+        }
+
+        if (conversationMaleImage != null)
+        {
+            conversationMaleImage.gameObject.SetActive(false);
+        }
+    }
+
+    private void HideConversationImages()
+    {
+        if (conversationMaleImage != null)
+        {
+            conversationMaleImage.gameObject.SetActive(false);
+        }
+
+        if (conversationFemaleImage != null)
+        {
+            conversationFemaleImage.gameObject.SetActive(false);
+        }
+    }
+
+    public void NotifyPointerDown(TouchArea area, Vector2 position)
+    {
+        if (isOutfitChangePause)
+        {
+            return;
+        }
+
+        isPointerDownActive = true;
+        isUndressTriggeredForCurrentPointer = false;
+        pointerDownArea = area;
+        pointerDownPosition = position;
+    }
+
+    public void NotifyDrag(TouchArea area, Vector2 position)
+    {
+        if (isOutfitChangePause || !isPointerDownActive || isUndressTriggeredForCurrentPointer)
+        {
+            return;
+        }
+
+        if (area != pointerDownArea)
+        {
+            return;
+        }
+
+        float distance = Vector2.Distance(pointerDownPosition, position);
+        if (distance < Mathf.Max(0f, undressDragThresholdPixels))
+        {
+            return;
+        }
+
+        if (!TryExecuteUndress(pointerDownArea))
+        {
+            return;
+        }
+
+        isUndressTriggeredForCurrentPointer = true;
+        suppressNextAreaClick = true;
+    }
+
+    public void NotifyPointerUp(TouchArea area, Vector2 position)
+    {
+        isPointerDownActive = false;
+        isUndressTriggeredForCurrentPointer = false;
+    }
+
+    private bool TryExecuteUndress(TouchArea area)
+    {
+        bool wasChanged = false;
+
+        if (topDragUnlocked && IsTopUndressArea(area) && TryAdvanceTopOutfit())
+        {
+            topDragUnlocked = false;
+            wasChanged = true;
+        }
+        else if (bottomDragUnlocked && IsBottomUndressArea(area) && TryAdvanceBottomOutfit())
+        {
+            bottomDragUnlocked = false;
+            wasChanged = true;
+        }
+
+        if (!wasChanged)
+        {
+            return false;
+        }
+
+        ApplyPose();
+        PlayOneShot(outfitChangeClip, outfitChangeMixerGroup);
+        StartOutfitChangePause();
+        return true;
+    }
+
+    private bool IsTopUndressArea(TouchArea area)
+    {
+        return area == TouchArea.RightBreast || area == TouchArea.LeftBreast;
+    }
+
+    private bool IsBottomUndressArea(TouchArea area)
+    {
+        return area == TouchArea.Crotch;
+    }
+
+    private bool TryAdvanceTopOutfit()
+    {
+        if (currentTopOutfit == TopOutfit.Sweater)
+        {
+            currentTopOutfit = TopOutfit.Bra;
+            return true;
+        }
+
+        if (currentTopOutfit == TopOutfit.Bra)
+        {
+            currentTopOutfit = TopOutfit.Topless;
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryAdvanceBottomOutfit()
+    {
+        if (currentBottomOutfit == BottomOutfit.Skirt)
+        {
+            currentBottomOutfit = BottomOutfit.Panties;
+            return true;
+        }
+
+        if (currentBottomOutfit == BottomOutfit.Panties)
+        {
+            currentBottomOutfit = BottomOutfit.Nude;
+            return true;
+        }
+
+        return false;
+    }
+
+    private void StartOutfitChangePause()
+    {
+        CancelOutfitChangePause();
+
+        bool shouldResumeAuto = isAutoRunning;
+        bool wasForcedAuto = isForcedAuto;
+
+        isOutfitChangePause = true;
+        outfitChangeToken++;
+        int token = outfitChangeToken;
+
+        StopAuto(false);
+        SetMenSlotImagesVisible(false);
+
+        outfitChangePauseCoroutine = StartCoroutine(OutfitChangePauseCoroutine(token, shouldResumeAuto, wasForcedAuto));
+    }
+
+    private IEnumerator OutfitChangePauseCoroutine(int token, bool shouldResumeAuto, bool wasForcedAuto)
+    {
+        yield return new WaitForSeconds(Mathf.Max(0f, outfitChangeDurationSeconds));
+
+        // Stop/reset increments outfitChangeToken so only the latest pause request is allowed to resume.
+        if (token != outfitChangeToken || isStopped)
+        {
+            yield break;
+        }
+
+        SetMenSlotImagesVisible(true);
+        isOutfitChangePause = false;
+        outfitChangePauseCoroutine = null;
+
+        if (shouldResumeAuto)
+        {
+            StartAuto(wasForcedAuto);
+        }
+    }
+
+    private void CancelOutfitChangePause()
+    {
+        outfitChangeToken++;
+        isOutfitChangePause = false;
+
+        if (outfitChangePauseCoroutine != null)
+        {
+            StopCoroutine(outfitChangePauseCoroutine);
+            outfitChangePauseCoroutine = null;
+        }
+    }
+
+    private void SetMenSlotImagesVisible(bool visible)
+    {
+        bool hasConfiguredMenSlots = menSlotImages != null && menSlotImages.Count > 0;
+        if (hasConfiguredMenSlots)
+        {
+            foreach (Image image in menSlotImages)
+            {
+                if (image != null)
+                {
+                    image.gameObject.SetActive(visible);
+                }
+            }
+
+            return;
+        }
+
+        if (manImage != null)
+        {
+            manImage.gameObject.SetActive(visible);
+        }
+    }
 }
 
 public enum TouchArea
@@ -824,6 +1226,18 @@ public enum AreaPlayMode
     ClickOnly,
     AutoOnly,
     Both
+}
+
+public enum ConversationSpeaker
+{
+    Male,
+    Female
+}
+
+public enum SingleUseUnlockType
+{
+    TopDrag,
+    BottomDrag
 }
 
 [Serializable]
@@ -941,4 +1355,23 @@ public struct PoseKey : IEquatable<PoseKey>
             return hash;
         }
     }
+}
+
+[Serializable]
+public class ConversationTurn
+{
+    public ConversationSpeaker speaker = ConversationSpeaker.Female;
+    public Sprite sprite;
+    public float durationSeconds = 1f;
+    public AudioClip audioClip;
+    public AudioMixerGroup audioMixerGroup;
+}
+
+[Serializable]
+public class SingleUseButtonData
+{
+    public Button button;
+    public List<ConversationTurn> turns = new List<ConversationTurn>();
+    public bool unlockOnComplete;
+    public SingleUseUnlockType unlockType = SingleUseUnlockType.TopDrag;
 }
