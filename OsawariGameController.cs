@@ -11,7 +11,10 @@ public class OsawariGameController : MonoBehaviour
     public Image backgroundImage;
     public Image bodyImage;
     public Image faceImage;
-    public Image manImage;
+    public Image manMouthImage;
+    public Image manRightHandImage;
+    public Image manLeftHandImage;
+    public Image manCrotchImage;
     public Image subImage;
 
     [Header("Touch Area Buttons")]
@@ -62,33 +65,21 @@ public class OsawariGameController : MonoBehaviour
 
     private ConstantButtonData currentAction;
     private TouchArea? currentArea;
-    private int currentFrameIndex;
     private bool autoToggleOn;
-    private bool isAutoRunning;
-    private bool isForcedAuto;
     private bool isStopped;
     private int backgroundIndex;
-
-    private readonly Dictionary<PoseKey, PoseSet> poseLookup = new Dictionary<PoseKey, PoseSet>();
-    private readonly Dictionary<TouchArea, AreaPlayMode> areaModeLookup = new Dictionary<TouchArea, AreaPlayMode>();
-
-    private Coroutine autoCoroutine;
     private Coroutine valueCoroutine;
     private Coroutine stopTransitionCoroutine;
     private Coroutine randomOnomatopoeiaCoroutine;
     private int stopTransitionToken;
+    private readonly Dictionary<MenSlot, SlotRuntimeState> slotStates = new Dictionary<MenSlot, SlotRuntimeState>();
 
     private AudioSource sfxAudioSource;
-    private AudioSource actionLoopAudioSource;
     private AudioSource stoppedLoopAudioSource;
 
     private void Awake()
     {
         sfxAudioSource = gameObject.AddComponent<AudioSource>();
-
-        actionLoopAudioSource = gameObject.AddComponent<AudioSource>();
-        actionLoopAudioSource.playOnAwake = false;
-        actionLoopAudioSource.loop = true;
 
         stoppedLoopAudioSource = gameObject.AddComponent<AudioSource>();
         stoppedLoopAudioSource.playOnAwake = false;
@@ -140,6 +131,8 @@ public class OsawariGameController : MonoBehaviour
             capturedAction.button.onClick.AddListener(() => HandleConstantActionClick(capturedAction));
         }
 
+        InitializeSlotStates();
+        HideAllMenSlotImages();
         UpdateAutoToggleIndicator();
         ApplyBackground();
     }
@@ -152,61 +145,16 @@ public class OsawariGameController : MonoBehaviour
             return;
         }
 
-        bool isAreaChanged = !currentArea.HasValue || currentArea.Value != area;
-        AreaPlayMode mode = GetAreaPlayMode(area);
-
-        if (isAutoRunning && isAreaChanged)
-        {
-            StopAuto(false);
-        }
-
         if (isStopped)
         {
             ExitStoppedState();
         }
 
-        if (isAreaChanged)
-        {
-            currentArea = area;
-            currentFrameIndex = 0;
-            ApplyPose();
-            StartValueTickerIfNeeded();
-            StartRandomOnomatopoeiaIfNeeded();
-
-            if (mode == AreaPlayMode.AutoOnly)
-            {
-                StartAuto(true);
-            }
-            else if (mode == AreaPlayMode.Both && autoToggleOn)
-            {
-                StartAuto(false);
-            }
-
-            return;
-        }
-
-        if (mode == AreaPlayMode.AutoOnly)
-        {
-            if (!isAutoRunning)
-            {
-                StartAuto(true);
-            }
-
-            return;
-        }
-
-        if (mode == AreaPlayMode.Both && isAutoRunning)
-        {
-            // Transition from auto to click mode when user clicks the same area in Both play mode.
-            autoToggleOn = false;
-            UpdateAutoToggleIndicator();
-            StopAuto(false);
-            StartValueTickerIfNeeded();
-            StartRandomOnomatopoeiaIfNeeded();
-            return;
-        }
-
-        AdvanceFrameAndApply();
+        currentArea = area;
+        StartOrUpdateSlot(currentAction, area);
+        ApplyPose();
+        StartValueTickerIfNeeded();
+        StartRandomOnomatopoeiaIfNeeded();
     }
 
     public void HandleConstantActionClick(ConstantButtonData action)
@@ -218,31 +166,17 @@ public class OsawariGameController : MonoBehaviour
 
         bool actionChanged = currentAction != action;
         currentAction = action;
-        currentFrameIndex = 0;
         isStopped = false;
 
-        BuildActionLookup(currentAction);
-
         StopStoppedTransition();
-        StopAuto(false);
-        StopActionLoopAudio();
         StopStoppedLoopAudio();
 
         PlayOneShot(action.startClip, action.audioMixerGroup);
 
         if (currentArea.HasValue)
         {
+            StartOrUpdateSlot(action, currentArea.Value);
             ApplyPose();
-
-            AreaPlayMode mode = GetAreaPlayMode(currentArea.Value);
-            if (mode == AreaPlayMode.AutoOnly)
-            {
-                StartAuto(true);
-            }
-            else if (mode == AreaPlayMode.Both && autoToggleOn)
-            {
-                StartAuto(false);
-            }
         }
 
         if (actionChanged)
@@ -257,9 +191,19 @@ public class OsawariGameController : MonoBehaviour
         autoToggleOn = !autoToggleOn;
         UpdateAutoToggleIndicator();
 
-        if (!autoToggleOn && isAutoRunning && !isForcedAuto)
+        if (autoToggleOn)
         {
-            StopAuto(false);
+            return;
+        }
+
+        foreach (var pair in slotStates)
+        {
+            MenSlot slot = pair.Key;
+            SlotRuntimeState state = pair.Value;
+            if (state.isAutoRunning && !state.isForcedAuto)
+            {
+                StopSlotAuto(slot, false);
+            }
         }
     }
 
@@ -293,16 +237,10 @@ public class OsawariGameController : MonoBehaviour
 
     private void EnterStoppedState()
     {
-        if (currentAction == null)
-        {
-            return;
-        }
-
         isStopped = true;
-        StopAuto(false);
+        StopAllSlots();
         StopValueTicker();
         StopRandomOnomatopoeia();
-        StopActionLoopAudio();
 
         ApplyStoppedVisual(stoppedVisual);
 
@@ -323,6 +261,7 @@ public class OsawariGameController : MonoBehaviour
         StopStoppedTransition();
         StopStoppedLoopAudio();
 
+        HideAllMenSlotImages();
         ApplyPose();
         StartValueTickerIfNeeded();
         StartRandomOnomatopoeiaIfNeeded();
@@ -349,100 +288,14 @@ public class OsawariGameController : MonoBehaviour
 
         ApplyFrameToImage(bodyImage, visual.bodySprite);
         ApplyFrameToImage(faceImage, visual.faceSprite);
-        ApplyFrameToImage(manImage, visual.manSprite);
+        SetSlotImageSprite(MenSlot.Mouth, visual.manMouthSprite ?? visual.manSprite);
+        SetSlotImageSprite(MenSlot.RightHand, visual.manRightHandSprite ?? visual.manSprite);
+        SetSlotImageSprite(MenSlot.LeftHand, visual.manLeftHandSprite ?? visual.manSprite);
+        SetSlotImageSprite(MenSlot.Crotch, visual.manCrotchSprite ?? visual.manSprite);
         ApplyFrameToImage(subImage, visual.subSprite);
 
         PlayOneShot(visual.oneShotClip, visual.audioMixerGroup);
         PlayLoop(stoppedLoopAudioSource, visual.loopClip, visual.audioMixerGroup);
-    }
-
-    private void StartAuto(bool forced)
-    {
-        if (!currentArea.HasValue)
-        {
-            return;
-        }
-
-        StopAuto(false);
-
-        isAutoRunning = true;
-        isForcedAuto = forced;
-
-        if (currentAction != null)
-        {
-            PlayLoop(actionLoopAudioSource, currentAction.loopClip, currentAction.audioMixerGroup);
-        }
-
-        autoCoroutine = StartCoroutine(AutoFrameCoroutine());
-    }
-
-    private void StopAuto(bool clearForced)
-    {
-        if (autoCoroutine != null)
-        {
-            StopCoroutine(autoCoroutine);
-            autoCoroutine = null;
-        }
-
-        isAutoRunning = false;
-
-        if (clearForced)
-        {
-            isForcedAuto = false;
-        }
-
-        StopActionLoopAudio();
-    }
-
-    private IEnumerator AutoFrameCoroutine()
-    {
-        while (isAutoRunning)
-        {
-            yield return new WaitForSeconds(GetAutoInterval());
-
-            if (!isAutoRunning || isStopped || currentAction == null || !currentArea.HasValue)
-            {
-                continue;
-            }
-
-            AdvanceFrameAndApply();
-        }
-    }
-
-    private float GetAutoInterval()
-    {
-        float baseInterval = fallbackAutoBaseInterval;
-        if (currentAction != null && currentAction.autoBaseInterval > 0f)
-        {
-            baseInterval = currentAction.autoBaseInterval;
-        }
-
-        float speedMultiplier = 1f;
-        if (speedSlider != null)
-        {
-            speedMultiplier = Mathf.Max(0.01f, speedSlider.value);
-        }
-
-        return baseInterval / speedMultiplier;
-    }
-
-    private void AdvanceFrameAndApply()
-    {
-        if (currentAction == null || !currentArea.HasValue)
-        {
-            return;
-        }
-
-        PoseSet pose = FindPose(currentArea.Value);
-        int frameCount = Mathf.Max(
-            SafeLength(pose?.manFrames),
-            SafeLength(pose?.bodyFrames),
-            SafeLength(pose?.subFrames),
-            1
-        );
-
-        currentFrameIndex = (currentFrameIndex + 1) % frameCount;
-        ApplyPose();
     }
 
     private void ApplyPose()
@@ -452,16 +305,17 @@ public class OsawariGameController : MonoBehaviour
             return;
         }
 
-        PoseSet pose = FindPose(currentArea.Value);
+        PoseSet pose = FindPose(currentAction, currentArea.Value);
         if (pose == null)
         {
             return;
         }
 
-        ApplyFrameToImage(bodyImage, SelectFrame(pose.bodyFrames, currentFrameIndex));
-        ApplyFrameToImage(manImage, SelectFrame(pose.manFrames, currentFrameIndex));
-        ApplyFrameToImage(subImage, SelectFrame(pose.subFrames, currentFrameIndex));
+        int displayFrameIndex = GetDisplayFrameIndexForLastArea();
+        ApplyFrameToImage(bodyImage, SelectFrame(pose.bodyFrames, displayFrameIndex));
+        ApplyFrameToImage(subImage, SelectFrame(pose.subFrames, displayFrameIndex));
         ApplyFrameToImage(faceImage, SelectFaceByKando(pose));
+        ApplyAllSlotMenImages();
     }
 
     private void ApplyBackground()
@@ -634,63 +488,282 @@ public class OsawariGameController : MonoBehaviour
         }
     }
 
-    private void BuildActionLookup(ConstantButtonData action)
+    private void InitializeSlotStates()
     {
-        poseLookup.Clear();
-        areaModeLookup.Clear();
+        slotStates.Clear();
+        foreach (MenSlot slot in Enum.GetValues(typeof(MenSlot)))
+        {
+            slotStates[slot] = new SlotRuntimeState();
+        }
+    }
 
+    private void StartOrUpdateSlot(ConstantButtonData action, TouchArea area)
+    {
         if (action == null)
         {
             return;
         }
 
-        if (action.poseEntries != null)
+        if (action.onlyExclusive)
         {
-            foreach (var entry in action.poseEntries)
+            StopAllSlots();
+        }
+        else
+        {
+            MenSlot? exclusiveSlot = GetActiveExclusiveSlot();
+            if (exclusiveSlot.HasValue)
             {
-                if (entry?.poseSet == null)
+                StopSlot(exclusiveSlot.Value);
+            }
+        }
+
+        MenSlot targetSlot = action.targetMenSlot;
+        SlotRuntimeState state = slotStates[targetSlot];
+        AreaPlayMode mode = GetAreaPlayMode(action, area);
+        bool areaChanged = !state.area.HasValue || state.area.Value != area;
+        bool actionChanged = state.action != action;
+
+        if (actionChanged || areaChanged || !state.isActive)
+        {
+            StartSlot(targetSlot, action, area, mode);
+            return;
+        }
+
+        if (mode == AreaPlayMode.AutoOnly)
+        {
+            if (!state.isAutoRunning)
+            {
+                StartSlotAuto(targetSlot, action, true);
+            }
+
+            return;
+        }
+
+        if (mode == AreaPlayMode.Both && state.isAutoRunning && !state.isForcedAuto)
+        {
+            autoToggleOn = false;
+            UpdateAutoToggleIndicator();
+            StopSlotAuto(targetSlot, false);
+            return;
+        }
+
+        AdvanceSlotFrame(targetSlot, action);
+    }
+
+    private void StartSlot(MenSlot slot, ConstantButtonData action, TouchArea area, AreaPlayMode mode)
+    {
+        StopSlot(slot);
+
+        SlotRuntimeState state = slotStates[slot];
+        state.action = action;
+        state.area = area;
+        state.frameIndex = 0;
+        state.isActive = true;
+        state.isAutoRunning = false;
+        state.isForcedAuto = false;
+        slotStates[slot] = state;
+
+        if (mode == AreaPlayMode.AutoOnly)
+        {
+            StartSlotAuto(slot, action, true);
+        }
+        else if (mode == AreaPlayMode.Both && autoToggleOn)
+        {
+            StartSlotAuto(slot, action, false);
+        }
+    }
+
+    private void StartSlotAuto(MenSlot slot, ConstantButtonData action, bool forced)
+    {
+        StopSlotAuto(slot, false);
+
+        SlotRuntimeState state = slotStates[slot];
+        state.isAutoRunning = true;
+        state.isForcedAuto = forced;
+        state.autoCoroutine = StartCoroutine(SlotAutoFrameCoroutine(slot));
+        slotStates[slot] = state;
+    }
+
+    private void StopSlotAuto(MenSlot slot, bool clearForced)
+    {
+        SlotRuntimeState state = slotStates[slot];
+        if (state.autoCoroutine != null)
+        {
+            StopCoroutine(state.autoCoroutine);
+            state.autoCoroutine = null;
+        }
+
+        state.isAutoRunning = false;
+        if (clearForced)
+        {
+            state.isForcedAuto = false;
+        }
+
+        slotStates[slot] = state;
+    }
+
+    private void StopSlot(MenSlot slot)
+    {
+        StopSlotAuto(slot, true);
+
+        SlotRuntimeState state = slotStates[slot];
+        state.action = null;
+        state.area = null;
+        state.frameIndex = 0;
+        state.isActive = false;
+        slotStates[slot] = state;
+
+        SetSlotImageSprite(slot, null);
+    }
+
+    private void StopAllSlots()
+    {
+        foreach (var pair in slotStates)
+        {
+            StopSlot(pair.Key);
+        }
+    }
+
+    private MenSlot? GetActiveExclusiveSlot()
+    {
+        foreach (var pair in slotStates)
+        {
+            SlotRuntimeState state = pair.Value;
+            if (state.isActive && state.action != null && state.action.onlyExclusive)
+            {
+                return pair.Key;
+            }
+        }
+
+        return null;
+    }
+
+    private IEnumerator SlotAutoFrameCoroutine(MenSlot slot)
+    {
+        while (true)
+        {
+            SlotRuntimeState state = slotStates[slot];
+            if (!state.isAutoRunning || state.action == null || !state.area.HasValue)
+            {
+                yield break;
+            }
+
+            yield return new WaitForSeconds(GetAutoInterval(state.action));
+
+            if (isStopped)
+            {
+                continue;
+            }
+
+            state = slotStates[slot];
+            if (!state.isAutoRunning || state.action == null)
+            {
+                continue;
+            }
+
+            AdvanceSlotFrame(slot, state.action);
+        }
+    }
+
+    private void AdvanceSlotFrame(MenSlot slot, ConstantButtonData action)
+    {
+        SlotRuntimeState state = slotStates[slot];
+        if (action == null || !state.area.HasValue)
+        {
+            return;
+        }
+
+        PoseSet pose = FindPose(action, state.area.Value);
+        int frameCount = GetMaxFrameCountForSlot(pose, slot);
+        state.frameIndex = (state.frameIndex + 1) % frameCount;
+        slotStates[slot] = state;
+        ApplyPose();
+    }
+
+    private int GetDisplayFrameIndexForLastArea()
+    {
+        if (currentAction == null)
+        {
+            return 0;
+        }
+
+        MenSlot slot = currentAction.targetMenSlot;
+        SlotRuntimeState state = slotStates[slot];
+        return state.isActive ? state.frameIndex : 0;
+    }
+
+    private void ApplyAllSlotMenImages()
+    {
+        foreach (var pair in slotStates)
+        {
+            MenSlot slot = pair.Key;
+            SlotRuntimeState state = pair.Value;
+            if (!state.isActive || state.action == null || !state.area.HasValue)
+            {
+                SetSlotImageSprite(slot, null);
+                continue;
+            }
+
+            PoseSet pose = FindPose(state.action, state.area.Value);
+            Sprite frame = SelectFrame(GetSlotFrames(pose, slot), state.frameIndex);
+            SetSlotImageSprite(slot, frame);
+        }
+    }
+
+    private float GetAutoInterval(ConstantButtonData action)
+    {
+        float baseInterval = fallbackAutoBaseInterval;
+        if (action != null && action.autoBaseInterval > 0f)
+        {
+            baseInterval = action.autoBaseInterval;
+        }
+
+        float speedMultiplier = 1f;
+        if (speedSlider != null)
+        {
+            speedMultiplier = Mathf.Max(0.01f, speedSlider.value);
+        }
+
+        return baseInterval / speedMultiplier;
+    }
+
+    private PoseSet FindPose(ConstantButtonData action, TouchArea area)
+    {
+        if (action?.poseEntries != null)
+        {
+            for (int i = 0; i < action.poseEntries.Count; i++)
+            {
+                PoseKeyEntry entry = action.poseEntries[i];
+                if (entry == null || entry.poseSet == null)
                 {
                     continue;
                 }
 
-                var key = new PoseKey(entry.area, entry.topOutfit, entry.bottomOutfit);
-                poseLookup[key] = entry.poseSet;
-            }
-        }
-
-        if (action.areaModes != null)
-        {
-            foreach (var modeEntry in action.areaModes)
-            {
-                if (modeEntry == null)
+                if (entry.area == area && entry.topOutfit == currentTopOutfit && entry.bottomOutfit == currentBottomOutfit)
                 {
-                    continue;
+                    return entry.poseSet;
                 }
-
-                areaModeLookup[modeEntry.area] = modeEntry.playMode;
             }
         }
+
+        return action != null ? action.fallbackPose : null;
     }
 
-    private PoseSet FindPose(TouchArea area)
+    private AreaPlayMode GetAreaPlayMode(ConstantButtonData action, TouchArea area)
     {
-        var key = new PoseKey(area, currentTopOutfit, currentBottomOutfit);
-        if (poseLookup.TryGetValue(key, out var pose))
+        if (action?.areaModes != null)
         {
-            return pose;
+            for (int i = 0; i < action.areaModes.Count; i++)
+            {
+                AreaPlayModeEntry modeEntry = action.areaModes[i];
+                if (modeEntry != null && modeEntry.area == area)
+                {
+                    return modeEntry.playMode;
+                }
+            }
         }
 
-        return currentAction != null ? currentAction.fallbackPose : null;
-    }
-
-    private AreaPlayMode GetAreaPlayMode(TouchArea area)
-    {
-        if (areaModeLookup.TryGetValue(area, out var mode))
-        {
-            return mode;
-        }
-
-        return currentAction != null ? currentAction.defaultPlayMode : AreaPlayMode.Both;
+        return action != null ? action.defaultPlayMode : AreaPlayMode.Both;
     }
 
     private void StopStoppedTransition()
@@ -716,6 +789,75 @@ public class OsawariGameController : MonoBehaviour
     private int SafeLength(Array array)
     {
         return array == null ? 0 : array.Length;
+    }
+
+    private Sprite[] GetSlotFrames(PoseSet pose, MenSlot slot)
+    {
+        if (pose == null)
+        {
+            return null;
+        }
+
+        switch (slot)
+        {
+            case MenSlot.Mouth:
+                return pose.manMouthFrames ?? pose.manFrames;
+            case MenSlot.RightHand:
+                return pose.manRightHandFrames ?? pose.manFrames;
+            case MenSlot.LeftHand:
+                return pose.manLeftHandFrames ?? pose.manFrames;
+            case MenSlot.Crotch:
+                return pose.manCrotchFrames ?? pose.manFrames;
+            default:
+                return pose.manFrames;
+        }
+    }
+
+    private int GetMaxFrameCountForSlot(PoseSet pose, MenSlot slot)
+    {
+        return Mathf.Max(
+            SafeLength(GetSlotFrames(pose, slot)),
+            SafeLength(pose?.bodyFrames),
+            SafeLength(pose?.subFrames),
+            1
+        );
+    }
+
+    private Image GetSlotImage(MenSlot slot)
+    {
+        switch (slot)
+        {
+            case MenSlot.Mouth:
+                return manMouthImage;
+            case MenSlot.RightHand:
+                return manRightHandImage;
+            case MenSlot.LeftHand:
+                return manLeftHandImage;
+            case MenSlot.Crotch:
+                return manCrotchImage;
+            default:
+                return null;
+        }
+    }
+
+    private void SetSlotImageSprite(MenSlot slot, Sprite sprite)
+    {
+        Image image = GetSlotImage(slot);
+        if (image == null)
+        {
+            return;
+        }
+
+        image.sprite = sprite;
+        image.gameObject.SetActive(sprite != null);
+    }
+
+    private void HideAllMenSlotImages()
+    {
+        foreach (MenSlot slot in Enum.GetValues(typeof(MenSlot)))
+        {
+            SetSlotImageSprite(slot, null);
+        }
     }
 
     private void PlayOneShot(AudioClip clip, AudioMixerGroup mixerGroup)
@@ -755,17 +897,6 @@ public class OsawariGameController : MonoBehaviour
         source.Play();
     }
 
-    private void StopActionLoopAudio()
-    {
-        if (actionLoopAudioSource == null)
-        {
-            return;
-        }
-
-        actionLoopAudioSource.Stop();
-        actionLoopAudioSource.clip = null;
-    }
-
     private void StopStoppedLoopAudio()
     {
         if (stoppedLoopAudioSource == null)
@@ -775,6 +906,17 @@ public class OsawariGameController : MonoBehaviour
 
         stoppedLoopAudioSource.Stop();
         stoppedLoopAudioSource.clip = null;
+    }
+
+    private class SlotRuntimeState
+    {
+        public ConstantButtonData action;
+        public TouchArea? area;
+        public int frameIndex;
+        public bool isActive;
+        public bool isAutoRunning;
+        public bool isForcedAuto;
+        public Coroutine autoCoroutine;
     }
 
     private void UpdateAutoToggleIndicator()
@@ -826,10 +968,23 @@ public enum AreaPlayMode
     Both
 }
 
+public enum MenSlot
+{
+    Mouth,
+    RightHand,
+    LeftHand,
+    Crotch
+}
+
 [Serializable]
 public class PoseSet
 {
     public Sprite[] bodyFrames;
+    public Sprite[] manMouthFrames;
+    public Sprite[] manRightHandFrames;
+    public Sprite[] manLeftHandFrames;
+    public Sprite[] manCrotchFrames;
+    // Legacy single-slot fallback.
     public Sprite[] manFrames;
     public Sprite[] subFrames;
     public Sprite faceLevel1;
@@ -867,6 +1022,11 @@ public class StoppedVisualSet
 {
     public Sprite bodySprite;
     public Sprite faceSprite;
+    public Sprite manMouthSprite;
+    public Sprite manRightHandSprite;
+    public Sprite manLeftHandSprite;
+    public Sprite manCrotchSprite;
+    // Legacy single-slot fallback.
     public Sprite manSprite;
     public Sprite subSprite;
 
@@ -880,6 +1040,8 @@ public class ConstantButtonData
 {
     public string actionName;
     public Button button;
+    public MenSlot targetMenSlot = MenSlot.Mouth;
+    public bool onlyExclusive;
 
     [Header("Play Modes")]
     public AreaPlayMode defaultPlayMode = AreaPlayMode.Both;
