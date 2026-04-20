@@ -254,9 +254,8 @@ public class OsawariGameController : MonoBehaviour
             return;
         }
 
-        TryPlayAreaConversation(currentAction, area);
-
         AdvanceFrameAndApply();
+        TryPlayAreaConversation(currentAction, area);
     }
 
     public void HandleConstantActionClick(ConstantButtonData action)
@@ -387,7 +386,7 @@ public class OsawariGameController : MonoBehaviour
 
     private IEnumerator PlaySequenceAndUnlockCoroutine(ConversationSequence sequence)
     {
-        yield return StartConversation(sequence);
+        yield return PlayConversationBlocking(sequence);
 
         openingConversationCoroutine = null;
         if (!isNextSceneTransitioning)
@@ -403,7 +402,8 @@ public class OsawariGameController : MonoBehaviour
 
         if (nextSceneData?.conversation != null)
         {
-            yield return StartConversation(nextSceneData.conversation);
+            yield return PlayConversationBlocking(nextSceneData.conversation);
+            // Stop button cancels transition by setting isNextSceneTransitioning = false.
             if (!isNextSceneTransitioning)
             {
                 yield break;
@@ -443,7 +443,7 @@ public class OsawariGameController : MonoBehaviour
 
         if (data.conversation != null)
         {
-            StartCoroutine(StartConversation(data.conversation));
+            PlayConversation(data.conversation);
         }
     }
 
@@ -455,7 +455,7 @@ public class OsawariGameController : MonoBehaviour
         }
 
         string actionKey = GetActionConversationKey(action);
-        string flagKey = actionKey + ":" + area;
+        string flagKey = $"{actionKey}:{area}";
         if (areaConversationFlags.Contains(flagKey))
         {
             return;
@@ -475,7 +475,7 @@ public class OsawariGameController : MonoBehaviour
             }
 
             areaConversationFlags.Add(flagKey);
-            StartCoroutine(StartConversation(candidate.conversation));
+            PlayConversation(candidate.conversation);
             break;
         }
     }
@@ -495,15 +495,28 @@ public class OsawariGameController : MonoBehaviour
         return string.Empty;
     }
 
-    private IEnumerator StartConversation(ConversationSequence sequence)
+    private void PlayConversation(ConversationSequence sequence)
+    {
+        BeginConversation(sequence);
+    }
+
+    private IEnumerator PlayConversationBlocking(ConversationSequence sequence)
+    {
+        Coroutine startedConversation = BeginConversation(sequence);
+        if (startedConversation != null)
+        {
+            yield return startedConversation;
+        }
+    }
+
+    private Coroutine BeginConversation(ConversationSequence sequence)
     {
         StopActiveConversation();
         conversationToken++;
         int token = conversationToken;
 
         activeConversationCoroutine = StartCoroutine(PlayConversationSequenceCoroutine(sequence, token));
-        yield return activeConversationCoroutine;
-        activeConversationCoroutine = null;
+        return activeConversationCoroutine;
     }
 
     private IEnumerator PlayConversationSequenceCoroutine(ConversationSequence sequence, int token)
@@ -512,6 +525,7 @@ public class OsawariGameController : MonoBehaviour
 
         if (sequence == null || sequence.turns == null)
         {
+            CompleteConversationIfCurrent(token);
             yield break;
         }
 
@@ -519,6 +533,7 @@ public class OsawariGameController : MonoBehaviour
         {
             if (token != conversationToken)
             {
+                CompleteConversationIfCurrent(token);
                 yield break;
             }
 
@@ -528,8 +543,7 @@ public class OsawariGameController : MonoBehaviour
                 continue;
             }
 
-            Image activeImage = turn.speaker == ConversationSpeaker.Male ? conversationMaleImage : conversationFemaleImage;
-            Image inactiveImage = turn.speaker == ConversationSpeaker.Male ? conversationFemaleImage : conversationMaleImage;
+            GetSpeakerImages(turn.speaker, out Image activeImage, out Image inactiveImage);
 
             if (inactiveImage != null)
             {
@@ -549,6 +563,7 @@ public class OsawariGameController : MonoBehaviour
             yield return FadeConversation(canvasGroup, 0f, 1f, turn.fadeInDuration, token);
             if (token != conversationToken)
             {
+                CompleteConversationIfCurrent(token);
                 yield break;
             }
 
@@ -564,12 +579,14 @@ public class OsawariGameController : MonoBehaviour
 
             if (token != conversationToken)
             {
+                CompleteConversationIfCurrent(token);
                 yield break;
             }
 
             yield return FadeConversation(canvasGroup, 1f, 0f, turn.fadeOutDuration, token);
             if (token != conversationToken)
             {
+                CompleteConversationIfCurrent(token);
                 yield break;
             }
 
@@ -579,6 +596,7 @@ public class OsawariGameController : MonoBehaviour
         if (token == conversationToken)
         {
             HideConversationImages();
+            CompleteConversationIfCurrent(token);
         }
     }
 
@@ -639,6 +657,27 @@ public class OsawariGameController : MonoBehaviour
         }
 
         HideConversationImages();
+    }
+
+    private void CompleteConversationIfCurrent(int token)
+    {
+        if (token == conversationToken)
+        {
+            activeConversationCoroutine = null;
+        }
+    }
+
+    private void GetSpeakerImages(ConversationSpeaker speaker, out Image activeImage, out Image inactiveImage)
+    {
+        if (speaker == ConversationSpeaker.Male)
+        {
+            activeImage = conversationMaleImage;
+            inactiveImage = conversationFemaleImage;
+            return;
+        }
+
+        activeImage = conversationFemaleImage;
+        inactiveImage = conversationMaleImage;
     }
 
     private void CancelAllConversationFlowsForStop()
