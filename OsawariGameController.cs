@@ -483,18 +483,8 @@ public class OsawariGameController : MonoBehaviour
 
     private float GetAutoInterval()
     {
-        float baseInterval = fallbackAutoBaseInterval;
-        if (currentAction != null && currentAction.autoBaseInterval > 0f)
-        {
-            baseInterval = currentAction.autoBaseInterval;
-        }
-
-        float speedMultiplier = 1f;
-        if (speedSlider != null)
-        {
-            speedMultiplier = Mathf.Max(0.01f, speedSlider.value);
-        }
-
+        float baseInterval = GetCurrentAutoBaseInterval();
+        float speedMultiplier = GetSpeedMultiplier();
         float interval = baseInterval / speedMultiplier;
         debugEffectiveAutoInterval = interval;
         return interval;
@@ -882,17 +872,32 @@ public class OsawariGameController : MonoBehaviour
 
     private void RefreshSpeedDebug()
     {
-        float sliderValue = speedSlider != null ? speedSlider.value : 1f;
+        float sliderValue = speedSlider != null ? speedSlider.value : GetSpeedMultiplier();
         debugSpeedSliderValue = sliderValue;
-        debugSpeedMultiplier = Mathf.Max(0.01f, sliderValue);
+        debugSpeedMultiplier = GetSpeedMultiplier();
 
-        float baseInterval = fallbackAutoBaseInterval;
+        float baseInterval = GetCurrentAutoBaseInterval();
+        debugEffectiveAutoInterval = baseInterval / debugSpeedMultiplier;
+    }
+
+    private float GetCurrentAutoBaseInterval()
+    {
         if (currentAction != null && currentAction.autoBaseInterval > 0f)
         {
-            baseInterval = currentAction.autoBaseInterval;
+            return currentAction.autoBaseInterval;
         }
 
-        debugEffectiveAutoInterval = baseInterval / debugSpeedMultiplier;
+        return fallbackAutoBaseInterval;
+    }
+
+    private float GetSpeedMultiplier()
+    {
+        if (speedSlider == null)
+        {
+            return 1f;
+        }
+
+        return Mathf.Max(0.01f, speedSlider.value);
     }
 
     private void HandleSingleUseButton(SingleUseButtonData buttonData)
@@ -1141,7 +1146,7 @@ public class OsawariGameController : MonoBehaviour
         CancelOutfitChangePause();
 
         bool shouldResumeAuto = isAutoRunning;
-        bool shouldResumeForcedAuto = isForcedAuto;
+        bool wasForcedAuto = isForcedAuto;
 
         isOutfitChangePause = true;
         outfitChangeToken++;
@@ -1150,10 +1155,10 @@ public class OsawariGameController : MonoBehaviour
         StopAuto(false);
         SetMenSlotImagesVisible(false);
 
-        outfitChangePauseCoroutine = StartCoroutine(OutfitChangePauseCoroutine(token, shouldResumeAuto, shouldResumeForcedAuto));
+        outfitChangePauseCoroutine = StartCoroutine(OutfitChangePauseCoroutine(token, shouldResumeAuto, wasForcedAuto));
     }
 
-    private IEnumerator OutfitChangePauseCoroutine(int token, bool shouldResumeAuto, bool shouldResumeForcedAuto)
+    private IEnumerator OutfitChangePauseCoroutine(int token, bool shouldResumeAuto, bool wasForcedAuto)
     {
         yield return new WaitForSeconds(Mathf.Max(0f, outfitChangeDurationSeconds));
 
@@ -1168,7 +1173,7 @@ public class OsawariGameController : MonoBehaviour
 
         if (shouldResumeAuto)
         {
-            StartAuto(shouldResumeForcedAuto);
+            StartAuto(wasForcedAuto);
         }
     }
 
