@@ -1,0 +1,2834 @@
+using UnityEngine;
+using UnityEngine.UI;
+using UnityEngine.SceneManagement;
+using UnityEngine.InputSystem;
+using UnityEngine.Audio;
+using System.Collections;
+using System.Collections.Generic;
+
+
+
+public class OsawariGameController : MonoBehaviour
+{
+
+    private Coroutine panelConversationCoroutine = null;
+    private int panelConversationToken = 0;
+
+    private void StopPanelConversation()
+    {
+        if (panelConversationCoroutine != null)
+        {
+            StopCoroutine(panelConversationCoroutine);
+            panelConversationCoroutine = null;
+        }
+
+        // ★重要：途中キャンセルでも出っぱなしにしない
+        HideAllPanelConversationImages();
+
+        panelConversationToken++;
+    }
+
+    [Header("Opening Event Settings")]
+    public OpeningTurnData[] openingTurns; // ターンごとの開始イベントデータ
+
+    [Header("Opening Event Common Settings")]
+    public Image openingAnimationImage; // アニメーターコントローラーを表示するための画像オブジェクト
+    public float openingFadeDuration = 0.5f; // 会話スプライトのフェード間隔
+    public AudioMixerGroup openingMixerGroup; // 開始時音声用ミキサーグループ
+
+    // ★★★ 追加: 開始イベント終了後のアニメーション設定 ★★★
+    [Header("Post-Opening Event Default Animation")]
+    public RuntimeAnimatorController defaultAnimatorController;  // 開始イベント終了後のアニメーション
+    public Sprite defaultIdleSprite;  // フォールバック用スプライト
+
+    private bool isOpeningEventActive = true; // 開始イベントが進行中かどうか
+
+    [System.Serializable]
+    public class AnimationData
+    {
+        public string animationName;        // アニメーションの名前
+        public AnimationClip animationClip; // アニメーションクリップ
+    }
+    [Header("Animation Controllers")]
+    public RuntimeAnimatorController stoppedAfterAnimatorController; // 停止後のアニメーションコントローラー
+    public RuntimeAnimatorController stoppedAnimatorController; // 停止のアニメーションコントローラー
+
+
+    [Header("Stopped Animations (Left Images) - Normal")]
+    public RuntimeAnimatorController stoppedLeftUpAnimatorController;
+    public RuntimeAnimatorController stoppedLeftDownAnimatorController;
+    public RuntimeAnimatorController stoppedAfterLeftUpAnimatorController;
+    public RuntimeAnimatorController stoppedAfterLeftDownAnimatorController;
+
+    private Animator centerAnimator;
+    private Animator leftDownAnimator;
+    private Animator leftUpAnimator;
+
+
+    [Header("UI Elements")]
+    public GameObject ConfirmationPanel;
+
+    [Header("Main Visuals")]
+    public Image centerImage; // センター画像
+    public Image leftUpImage; // 左上画像
+    public Image leftDownImage; // 左下画像
+
+    [System.Serializable]
+    public class ButtonTurnData
+    {
+        public Sprite turnSprite; // ターンごとのスプライト
+        public AudioClip turnSound; // ターンごとの音声
+    }
+
+    public class ButtonActionComponent : MonoBehaviour
+    {
+        [Header("Per-Turn Data")]
+        public ButtonTurnData[] turnData; // ターンごとの設定データ
+    }
+
+    public Sprite defaultSprite;
+    public AudioClip defaultClip;
+    public AudioMixerGroup defaultMixerGroup; // defaultClip用のミキサーグループ
+    public Sprite stoppedSprite;
+    public AudioClip stoppedClip;
+    public AudioMixerGroup stoppedMixerGroup; // stoppedClip用のミキサーグループ
+    public Sprite stoppedAfterSprite;
+    public AudioClip stoppedAfterClip;
+    public AudioMixerGroup stoppedAfterMixerGroup; // stoppedAfterClip用のミキサーグループ
+    public Sprite[] kandoTotalSprites;
+    public Image kandoTotalImage;
+
+
+    [Header("Single-use Buttons Data")]
+    public List<SingleUseButtonData> singleUseButtons;
+    public AudioMixerGroup singleUseButtonsMixerGroup; // singleUseButtons用のミキサーグループ
+
+    [Header("Constant Buttons Data")]
+    public List<ConstantButtonData> constantButtons;
+    public AudioMixerGroup constantButtonsMixerGroup; // constantButtons用のミキサーグループ
+
+    [Header("Clickable Areas")]
+    public RectTransform clickArea1;
+    public RectTransform clickArea2;
+
+    [Header("Next Scene Transition")]
+    // public Sprite[] nextSceneSprites;
+    // public AudioClip[] nextSceneClips;
+    public Button nextSceneButton;
+    public NextSceneData nextSceneData;  // ★ 追加
+    public AudioMixerGroup nextSceneMixerGroup;
+
+
+    [Header("Game Settings")]
+    public float kandoIncreaseRate = 1.0f;
+    public int kandoThreshold = 100;
+    public float stoppedImageDuration = 10.0f;
+    public string nextSceneName;
+    public float fadeDuration = 0.5f;
+
+    [Header("Fade Settings")]
+    public float singleButtonFadeDuration = 0.5f; // シングルボタン用のフェード秒数
+    public float constantButtonFadeDuration = 0.5f; // コンスタントボタン用のフェード秒数
+
+
+    [SerializeField] // インスペクターに表示
+    private bool isActionActive = false;
+    [SerializeField] // インスペクターに表示
+    private bool isStopped = false;
+    [SerializeField] // インスペクターに表示
+    private bool isSingleUseButtonTurn = false; // SingleUseDataの進行中かどうか
+    [SerializeField] // インスペクターに表示
+    private bool isConstantButtonTurn = false; // ConstantDataの進行中かどうか
+    private ConstantButtonData currentAction;
+    [SerializeField]
+    private int kandoValue = 0;
+    private int currentConversationIndex = 0;
+    private int currentConstantButtonIndex = 0; // ConstantButtonData 専用のインデックス
+    private int currentSingleUseConversationIndex = 0; // SingleUseButtonData 専用のインデックス
+    private int currentConstantConversationIndex = 0; // ConstantButtonData 専用のインデックス
+    private int currentSingleUseButtonIndex = 0;
+    private HashSet<ConstantButtonData> constantButtonUsed = new HashSet<ConstantButtonData>();
+    private int lastButtonIndex = -1; // 前回選択された ConstantButtonData のインデックス
+    [SerializeField] // インスペクターで確認可能にする
+    private string lastClickedPanel = ""; // 前回クリックされたパネル（初期値は空）
+    private Coroutine stopCoroutine = null; // 停止処理コルーチンを管理
+
+    // パネルごとの会話進行状態を記録するディクショナリ
+    private Dictionary<string, bool> panelConversationFlags = new Dictionary<string, bool>();
+
+
+    public InputAction clickAction;
+
+    [Header("Display Duration Settings")]
+    public float singleButtonDisplayDuration = 1.0f;  // シングルボタン表示持続時間
+    public float constantButtonDisplayDuration = 1.5f; // コンスタントボタン表示持続時間
+
+    private AudioSource audioSource;
+
+    // ★追加：エラー音を重ねて鳴らすための専用AudioSource
+    private AudioSource errorAudioSource;
+
+    // ★追加：行動中ループ音（会話用 audioSource と分ける）
+    private AudioSource actionLoopAudioSource;
+
+    // ★追加：停止状態BGM（stoppedAfterClip）をループ再生する専用AudioSource
+    private AudioSource stoppedLoopAudioSource;
+
+    [Header("Constant Button Panel Error Sound")]
+    public AudioClip panelNotAllowedClip;
+    public AudioMixerGroup panelNotAllowedMixerGroup;
+
+    private Coroutine randomSpriteCoroutine; // ランダムスプライト表示コルーチンを管理
+
+    // randomActionImage1〜4 の「子」コルーチン参照を保持する
+    private Coroutine randomImage1Coroutine;
+    private Coroutine randomImage2Coroutine;
+    private Coroutine randomImage3Coroutine;
+    private Coroutine randomImage4Coroutine;
+
+    private bool isStoppedRandomActive = false;
+
+    private bool isNextSceneTransitioning = false;
+
+    [Header("Fade (Pre-Event)")]
+    public CanvasGroup fadeCanvasGroup; // 画面全体を覆う黒ImageのCanvasGroup
+    public float preEventFadeDuration = 0.3f; // 会話前の暗転速度
+    public float preEventBlackHold = 0.05f;   // 真っ黒で止める時間（任意）
+
+
+    private void OnEnable()
+    {
+        clickAction.Enable();
+    }
+
+    private void OnDisable()
+    {
+        clickAction.Disable();
+    }
+
+    private void Start()
+    {
+        // オーディオソースを追加し、audioSource変数に格納
+        audioSource = gameObject.AddComponent<AudioSource>();
+
+        // ★追加：エラー音は別AudioSourceで重ねて鳴らす
+        errorAudioSource = gameObject.AddComponent<AudioSource>();
+        errorAudioSource.playOnAwake = false;
+        // ★追加：行動中ループ音（会話用 audioSource と分ける）
+        actionLoopAudioSource = gameObject.AddComponent<AudioSource>();
+        actionLoopAudioSource.playOnAwake = false;
+        actionLoopAudioSource.loop = true;
+
+        // ★追加：停止後ループ音（会話用 audioSource と分ける）
+        stoppedLoopAudioSource = gameObject.AddComponent<AudioSource>();
+        stoppedLoopAudioSource.playOnAwake = false;
+        stoppedLoopAudioSource.loop = true;
+
+        // 各UI画像にアタッチされているAnimatorコンポーネントを取得
+        centerAnimator = centerImage.GetComponent<Animator>();
+        leftDownAnimator = leftDownImage.GetComponent<Animator>();
+        leftUpAnimator = leftUpImage.GetComponent<Animator>();
+
+
+        // targetImages を非表示に設定 (singleUseButtons)
+        foreach (var buttonData in singleUseButtons)
+        {
+            // クリックイベントを追加
+            buttonData.button.onClick.AddListener(() => HandleSingleUseButton(buttonData));
+            buttonData.button.gameObject.SetActive(false); // ★非表示
+
+            if (buttonData.targetImages != null)
+            {
+                // 各ターゲット画像を非アクティブ化
+                foreach (var image in buttonData.targetImages)
+                {
+                    if (image != null)
+                    {
+                        image.gameObject.SetActive(false); // 非表示
+                    }
+                }
+            }
+        }
+
+
+
+        // コンスタントボタンの設定を初期化
+        // コンスタントボタンの設定を初期化
+        foreach (var buttonData in constantButtons)
+        {
+            buttonData.button.onClick.AddListener(() => HandleConstantAction(buttonData));
+            buttonData.button.gameObject.SetActive(false);
+
+            if (buttonData.conversationButton != null)
+            {
+                buttonData.conversationButton.onClick.AddListener(() => HandleConstantConversation(buttonData));
+                buttonData.conversationButton.gameObject.SetActive(false);
+            }
+
+            // ★通常のみ：4種類の画像を初期化（パネルA）
+            if (buttonData.randomActionImage1PanelA != null)
+                buttonData.randomActionImage1PanelA.gameObject.SetActive(false);
+            if (buttonData.randomActionImage2PanelA != null)
+                buttonData.randomActionImage2PanelA.gameObject.SetActive(false);
+            if (buttonData.randomActionImage3PanelA != null)
+                buttonData.randomActionImage3PanelA.gameObject.SetActive(false);
+            if (buttonData.randomActionImage4PanelA != null)
+                buttonData.randomActionImage4PanelA.gameObject.SetActive(false);
+
+            // ★通常のみ：4種類の画像を初期化（パネルB）
+            if (buttonData.randomActionImage1PanelB != null)
+                buttonData.randomActionImage1PanelB.gameObject.SetActive(false);
+            if (buttonData.randomActionImage2PanelB != null)
+                buttonData.randomActionImage2PanelB.gameObject.SetActive(false);
+            if (buttonData.randomActionImage3PanelB != null)
+                buttonData.randomActionImage3PanelB.gameObject.SetActive(false);
+            if (buttonData.randomActionImage4PanelB != null)
+                buttonData.randomActionImage4PanelB.gameObject.SetActive(false);
+
+            Debug.Log($"All random action images for {buttonData.button.name} initialized. (NORMAL)");
+        }
+
+
+        // ゲーム開始時にタイトルバックのパネルを非表示にする
+        if (ConfirmationPanel != null)
+        {
+            ConfirmationPanel.SetActive(false);  // 確認パネルを非アクティブ化
+            Debug.Log("ConfirmationPanel is hidden on game start.");
+        }
+        else
+        {
+            Debug.LogWarning("ConfirmationPanel is not assigned!");
+        }
+        // クリックエリア1に対する設定
+        if (clickArea1 != null)
+        {
+            Debug.Log("clickArea1 is assigned."); // クリックエリア1が設定されている場合
+            Button clickArea1Button = clickArea1.GetComponent<Button>();
+            if (clickArea1Button != null)
+            {
+                // クリックエリア1のボタンにクリックイベントを追加 (PanelA用)
+                clickArea1Button.onClick.AddListener(() => HandlePanelClick("PanelA"));
+            }
+            else
+            {
+                Debug.LogError("Button component not found on clickArea1!"); // ボタンが存在しない場合にエラー
+            }
+        }
+        else
+        {
+            Debug.LogError("clickArea1 is not assigned!");
+        }
+
+        // クリックエリア2に対する設定
+        if (clickArea2 != null)
+        {
+            Debug.Log("clickArea2 is assigned."); // クリックエリア2が設定されている場合
+            Button clickArea2Button = clickArea2.GetComponent<Button>();
+            if (clickArea2Button != null)
+            {
+                // クリックエリア2のボタンにクリックイベントを追加 (PanelB用)
+                clickArea2Button.onClick.AddListener(() => HandlePanelClick("PanelB"));
+            }
+            else
+            {
+                Debug.LogError("Button component not found on clickArea2!"); // ボタンが存在しない場合にエラー
+            }
+        }
+        else
+        {
+            Debug.LogError("clickArea2 is not assigned!");
+        }
+
+        // 次のシーンボタンを非アクティブ化し、クリックイベントを登録
+        nextSceneButton.gameObject.SetActive(false);
+        nextSceneButton.onClick.AddListener(() => StartCoroutine(HandleNextScene()));  // ★ 修正: コルーチン実行
+
+
+
+        UpdateKandoTotalImage();
+
+        // ★追加：オープニング中はパネルにホバーしてもカーソルが変わらないようにする
+        RefreshPanelCursorEnabled();
+
+
+        // 開始イベントを再生
+        StartCoroutine(PlayOpeningEvent());
+
+        if (fadeCanvasGroup != null)
+        {
+            fadeCanvasGroup.alpha = 0f;
+            fadeCanvasGroup.gameObject.SetActive(false);
+        }
+    }
+
+    // ��ンダム表示を確実に止めて、残っている randomActionImage を全部消す
+    private void StopRandomActionSpritesAndHideAll()
+    {
+        isStoppedRandomActive = false; // ★追加：停止中ランダムも終了
+
+        // 親コルーチン停止
+        if (randomSpriteCoroutine != null)
+        {
+            StopCoroutine(randomSpriteCoroutine);
+            randomSpriteCoroutine = null;
+        }
+
+        // 子コルーチン停止（ここが重要）
+        if (randomImage1Coroutine != null) { StopCoroutine(randomImage1Coroutine); randomImage1Coroutine = null; }
+        if (randomImage2Coroutine != null) { StopCoroutine(randomImage2Coroutine); randomImage2Coroutine = null; }
+        if (randomImage3Coroutine != null) { StopCoroutine(randomImage3Coroutine); randomImage3Coroutine = null; }
+        if (randomImage4Coroutine != null) { StopCoroutine(randomImage4Coroutine); randomImage4Coroutine = null; }
+
+        // 画面に残っている可能性がある randomActionImage を全て消す（全ボタン分）
+        foreach (var b in constantButtons)
+        {
+            HideRandomImage(b.randomActionImage1PanelA);
+            HideRandomImage(b.randomActionImage2PanelA);
+            HideRandomImage(b.randomActionImage3PanelA);
+            HideRandomImage(b.randomActionImage4PanelA);
+
+            HideRandomImage(b.randomActionImage1PanelB);
+            HideRandomImage(b.randomActionImage2PanelB);
+            HideRandomImage(b.randomActionImage3PanelB);
+            HideRandomImage(b.randomActionImage4PanelB);
+        }
+    }
+
+    private void HideRandomImage(Image img)
+    {
+        if (img == null) return;
+
+        // フェード途中で止まっても “見えない” 状態に固定
+        var cg = img.GetComponent<CanvasGroup>();
+        if (cg != null) cg.alpha = 0f;
+
+        img.gameObject.SetActive(false);
+    }
+
+    // 停止中ランダム表示を開始
+    private void StartStoppedRandomSprites(ConstantButtonData action, string panelName)
+    {
+        if (action == null) return;
+
+        // いったん全停止＆全非表示（混ざり防止）
+        StopRandomActionSpritesAndHideAll();
+
+        // 停止中ランダム開始
+        isStoppedRandomActive = true;
+
+        // shared Image（onomatope1〜4）を取得
+        var imgs = GetSharedRandomImages(action, panelName);
+        Image img1 = imgs.img1;
+        Image img2 = imgs.img2;
+        Image img3 = imgs.img3;
+        Image img4 = imgs.img4;
+
+        // stopped用スプライトが未設定なら何もしない
+        bool any =
+            (action.stoppedRandomImage1Sprites != null && action.stoppedRandomImage1Sprites.Length > 0) ||
+            (action.stoppedRandomImage2Sprites != null && action.stoppedRandomImage2Sprites.Length > 0) ||
+            (action.stoppedRandomImage3Sprites != null && action.stoppedRandomImage3Sprites.Length > 0) ||
+            (action.stoppedRandomImage4Sprites != null && action.stoppedRandomImage4Sprites.Length > 0);
+
+        if (!any) return;
+
+        // ※ isActionActive=false / isStopped=true でも回るように、後で while 条件を直します（後述）
+        randomSpriteCoroutine = StartCoroutine(PlayRandomActionSprites(
+            action.stoppedRandomImage1Sprites,
+            action.stoppedRandomImage2Sprites,
+            action.stoppedRandomImage3Sprites,
+            action.stoppedRandomImage4Sprites,
+            img1, img2, img3, img4,
+            action));
+    }
+
+    private void StartStoppedAfterRandomSprites(ConstantButtonData action, string panelName)
+    {
+        if (action == null) return;
+
+        // いったん全停止＆全非表示（混ざり防止）
+        StopRandomActionSpritesAndHideAll();
+
+        // 停止中ランダム開始（このフラグを使う方式の場合）
+        isStoppedRandomActive = true;
+
+        // 表示先は「停止前のパネル/スペシャル状況で使っていたImage」を流用する（現状方針）
+        var imgs = GetSharedRandomImages(action, panelName);
+        Image img1 = imgs.img1;
+        Image img2 = imgs.img2;
+        Image img3 = imgs.img3;
+        Image img4 = imgs.img4;
+
+        bool any =
+            (action.stoppedAfterRandomImage1Sprites != null && action.stoppedAfterRandomImage1Sprites.Length > 0) ||
+            (action.stoppedAfterRandomImage2Sprites != null && action.stoppedAfterRandomImage2Sprites.Length > 0) ||
+            (action.stoppedAfterRandomImage3Sprites != null && action.stoppedAfterRandomImage3Sprites.Length > 0) ||
+            (action.stoppedAfterRandomImage4Sprites != null && action.stoppedAfterRandomImage4Sprites.Length > 0);
+
+        if (!any) return;
+
+        randomSpriteCoroutine = StartCoroutine(PlayRandomActionSprites(
+            action.stoppedAfterRandomImage1Sprites,
+            action.stoppedAfterRandomImage2Sprites,
+            action.stoppedAfterRandomImage3Sprites,
+            action.stoppedAfterRandomImage4Sprites,
+            img1, img2, img3, img4,
+            action));
+    }
+
+    // shared Image（onomatope1〜4）取得ヘルパー
+private (Image img1, Image img2, Image img3, Image img4) GetSharedRandomImages(ConstantButtonData action, string panelName)
+{
+    if (panelName == "PanelA")
+    {
+        return (
+            action.randomActionImage1PanelA,
+            action.randomActionImage2PanelA,
+            action.randomActionImage3PanelA,
+            action.randomActionImage4PanelA
+        );
+    }
+
+    // PanelB
+    return (
+        action.randomActionImage1PanelB,
+        action.randomActionImage2PanelB,
+        action.randomActionImage3PanelB,
+        action.randomActionImage4PanelB
+    );
+}
+
+    // MainGameController 内に追加
+    private void RefreshConstantButtonsVisibility()
+    {
+        foreach (var buttonData in constantButtons)
+        {
+            if (buttonData == null || buttonData.button == null) continue;
+
+            buttonData.button.gameObject.SetActive(true);
+
+            if (buttonData.conversationButton != null)
+                buttonData.conversationButton.gameObject.SetActive(false);
+        }
+    }
+
+    private bool IsPanelAllowedForCurrentAction(string panelName)
+    {
+        if (currentAction == null) return false;
+
+        if (panelName == "PanelA") return currentAction.allowPanelA;
+        if (panelName == "PanelB") return currentAction.allowPanelB;
+
+        return false;
+    }
+
+    // ===== 会話の「進行済み」判定キー生成（PanelA/B + Before/After + Action） =====
+
+    private string GetActionKey(ConstantButtonData action)
+    {
+        // ボタン名で識別（※同名ボタンがあるなら index 方式に変えてください）
+        if (action != null && action.button != null)
+            return action.button.name;
+
+        return "UnknownAction";
+    }
+
+    private string GetConversationKey(string panelName, ConstantButtonData action)
+    {
+        // ★Special撤去：Before/After の概念が不要なので panel + action のみでOK
+        string actionKey = GetActionKey(action);
+        return $"{panelName}_{actionKey}";
+    }
+    private bool IsPanelConversationTriggered(string panelName, ConstantButtonData action)
+    {
+        string key = GetConversationKey(panelName, action);
+
+        if (!panelConversationFlags.ContainsKey(key))
+        {
+            panelConversationFlags[key] = false;
+        }
+        return panelConversationFlags[key];
+    }
+
+    private void SetPanelConversationTriggered(string panelName, ConstantButtonData action)
+    {
+        string key = GetConversationKey(panelName, action);
+        panelConversationFlags[key] = true;
+    }
+
+
+    private IEnumerator PlayOpeningEvent()
+    {
+        Debug.Log("Starting opening event...");
+        isOpeningEventActive = true;
+
+        // 各ターンを順次処理
+        for (int i = 0; i < openingTurns.Length; i++)
+        {
+            OpeningTurnData turn = openingTurns[i];
+
+            // ターンごとのアニメーションコントローラーを設定
+            if (turn.animatorController != null && openingAnimationImage != null)
+            {
+                Animator animator = openingAnimationImage.GetComponent<Animator>();
+                if (animator != null)
+                {
+                    animator.runtimeAnimatorController = turn.animatorController;
+                    Debug.Log($"Applied animation controller for turn {i}: {turn.animatorController.name}");
+
+                    // アニメーションの再生（最初のステートを再生）
+                    animator.Play(0, 0, 0);
+                }
+                else
+                {
+                    Debug.LogWarning($"Animator component not found on openingAnimationImage for turn {i}");
+                }
+            }
+
+            // 会話スプライト表示用の画像オブジェクトの確認
+            if (turn.conversationImage == null)
+            {
+                Debug.LogWarning($"Conversation image not assigned for turn {i}, skipping...");
+                continue;
+            }
+
+            // 会話スプライトを表示
+            turn.conversationImage.gameObject.SetActive(true);
+            turn.conversationImage.sprite = turn.conversationSprite;
+
+            // フェードイン
+            yield return FadeIn(EnsureCanvasGroup(turn.conversationImage), openingFadeDuration);
+
+            // 音声を再生
+            if (turn.audioClip != null)
+            {
+                PlayClip(turn.audioClip, openingMixerGroup);
+                Debug.Log($"Playing audio for turn {i}: {turn.audioClip.name}");
+            }
+
+            // ターンごとの表示持続時間
+            yield return new WaitForSeconds(turn.displayDuration);
+
+            // フェードアウト
+            yield return FadeOut(EnsureCanvasGroup(turn.conversationImage), openingFadeDuration);
+
+            turn.conversationImage.gameObject.SetActive(false);
+        }
+
+        // イベント終了後の処理
+        EndOpeningEvent();
+    }
+
+    private void EndOpeningEvent()
+    {
+        Debug.Log("Opening event completed. Starting game...");
+        isOpeningEventActive = false;
+
+
+        // ★★★ 修正: 開始イベント終了後のアニメーションを設定 ★★★
+        if (centerAnimator != null && defaultAnimatorController != null)
+        {
+            // アニメーターを設定
+            centerAnimator.runtimeAnimatorController = defaultAnimatorController;
+            centerAnimator.Play(0, 0, 0);  // アニメーションを最初から再生
+            Debug.Log("Applied default animator after opening event.");
+        }
+        else
+        {
+            // フォールバック: アニメーターが設定されていない場合はスプライトを表示
+            if (centerImage != null && defaultSprite != null)
+            {
+                centerImage.sprite = defaultSprite;
+                Debug.Log("Applied default sprite as fallback.");
+            }
+            else if (centerImage != null && defaultIdleSprite != null)
+            {
+                centerImage.sprite = defaultIdleSprite;
+                Debug.Log("Applied default idle sprite.");
+            }
+        }
+
+        if (singleUseButtons.Count > 0)
+        {
+            singleUseButtons[0].button.gameObject.SetActive(true);
+            Debug.Log("Enabled first SingleUse button.");
+        }
+
+        // コンスタントボタンを表示（スペシャル後解放の条件込み）
+        RefreshConstantButtonsVisibility();
+
+        RefreshPanelCursorEnabled();
+    }
+
+    private void ResetImageStates()
+    {
+        if (isStopped) return; // ★停止中は左上/左下を消さない
+
+        // 左上の画像 (`leftUpImage`) を非表示に設定
+        leftUpImage.gameObject.SetActive(false);
+
+        // 左下の画像 (`leftDownImage`) を非表示に設定
+        leftDownImage.gameObject.SetActive(false);
+
+        // 両方の左側画像 (LeftUpとLeftDown) が非表示になったことをログに記録
+        Debug.Log("Reset all left images (LeftUp and LeftDown).");
+    }
+
+    private void StopActionState()
+    {
+        isStopped = true;
+
+        // ★Special系撤去：常に通常の stoppedAnimatorController を使用
+        RuntimeAnimatorController controller = stoppedAnimatorController;
+
+        if (controller != null && centerAnimator != null)
+        {
+            centerAnimator.runtimeAnimatorController = controller;
+            centerAnimator.Play("StoppedAnimation");
+            Debug.Log("Center Image switched to 'StoppedAnimation' (NORMAL).");
+        }
+        else
+        {
+            if (centerImage != null && stoppedSprite != null)
+            {
+                centerImage.sprite = stoppedSprite;
+                Debug.Log("StoppedSprite applied as fallback.");
+            }
+        }
+
+        ResetImageStates();
+    }
+
+    private void ResumeDefaultState()
+    {
+        // 停止状態を解除する
+        isStopped = false;
+
+        if (currentAction != null && centerAnimator != null)
+        {
+            RuntimeAnimatorController controllerToUse = null;
+
+            // ★Special系撤去：PanelA/B の通常コントローラのみ
+            if (lastClickedPanel == "PanelA")
+            {
+                controllerToUse = currentAction.area1AnimatorController;
+            }
+            else if (lastClickedPanel == "PanelB")
+            {
+                controllerToUse = currentAction.area2AnimatorController;
+            }
+
+            if (controllerToUse != null)
+            {
+                centerAnimator.runtimeAnimatorController = controllerToUse;
+
+                if (centerAnimator.HasState(0, Animator.StringToHash("DefaultState")))
+                {
+                    centerAnimator.Play("DefaultState");
+                    Debug.Log("Center Image resumed DefaultState (NORMAL).");
+                }
+                else
+                {
+                    Debug.LogError("Animator does not contain a state named 'DefaultState'.");
+                }
+            }
+        }
+
+        // 左上・左下の表示更新（ここは UpdateImageStates 側も通常版に直してある前提）
+        UpdateImageStates(lastClickedPanel);
+    }
+
+    private void UpdateImageStates(string panelName)
+    {
+        ResetImageStates();
+
+        if (currentAction == null)
+            return;
+
+        if (panelName == "PanelA")
+        {
+            RuntimeAnimatorController leftUpController = currentAction.area1LeftUpAnimatorController;
+            RuntimeAnimatorController leftDownController = currentAction.area1LeftDownAnimatorController;
+
+            if (leftUpController != null && leftUpAnimator != null && leftUpImage != null)
+            {
+                leftUpAnimator.runtimeAnimatorController = leftUpController;
+                leftUpImage.gameObject.SetActive(true);
+                Debug.Log("LeftUpImage is set to visible for PanelA (NORMAL).");
+            }
+            else if (leftUpImage != null)
+            {
+                leftUpImage.gameObject.SetActive(false);
+                Debug.Log("LeftUpImage remains hidden for PanelA: No AnimatorController.");
+            }
+
+            if (leftDownController != null && leftDownAnimator != null && leftDownImage != null)
+            {
+                leftDownAnimator.runtimeAnimatorController = leftDownController;
+                leftDownImage.gameObject.SetActive(true);
+                Debug.Log("LeftDownImage is set to visible for PanelA (NORMAL).");
+            }
+            else if (leftDownImage != null)
+            {
+                leftDownImage.gameObject.SetActive(false);
+                Debug.Log("LeftDownImage remains hidden for PanelA: No AnimatorController.");
+            }
+        }
+        else if (panelName == "PanelB")
+        {
+            RuntimeAnimatorController leftUpController = currentAction.area2LeftUpAnimatorController;
+            RuntimeAnimatorController leftDownController = currentAction.area2LeftDownAnimatorController;
+
+            if (leftUpController != null && leftUpAnimator != null && leftUpImage != null)
+            {
+                leftUpAnimator.runtimeAnimatorController = leftUpController;
+                leftUpImage.gameObject.SetActive(true);
+                Debug.Log("LeftUpImage is set to visible for PanelB (NORMAL).");
+            }
+            else if (leftUpImage != null)
+            {
+                leftUpImage.gameObject.SetActive(false);
+                Debug.Log("LeftUpImage remains hidden for PanelB: No AnimatorController.");
+            }
+
+            if (leftDownController != null && leftDownAnimator != null && leftDownImage != null)
+            {
+                leftDownAnimator.runtimeAnimatorController = leftDownController;
+                leftDownImage.gameObject.SetActive(true);
+                Debug.Log("LeftDownImage is set to visible for PanelB (NORMAL).");
+            }
+            else if (leftDownImage != null)
+            {
+                leftDownImage.gameObject.SetActive(false);
+                Debug.Log("LeftDownImage remains hidden for PanelB: No AnimatorController.");
+            }
+        }
+    }
+    private void RefreshPanelCursorEnabled()
+    {
+        bool allowA = currentAction != null && currentAction.allowPanelA;
+        bool allowB = currentAction != null && currentAction.allowPanelB;
+
+        var cursorA = clickArea1 != null ? clickArea1.GetComponent<UICursorChange>() : null;
+        var cursorB = clickArea2 != null ? clickArea2.GetComponent<UICursorChange>() : null;
+
+        if (cursorA != null)
+        {
+            cursorA.cursorEnabled = allowA;
+            if (!allowA) cursorA.ResetCursorToDefault();
+        }
+
+        if (cursorB != null)
+        {
+            cursorB.cursorEnabled = allowB;
+            if (!allowB) cursorB.ResetCursorToDefault();
+        }
+    }
+    private void HandlePanelClick(string panelName)
+    {
+        if (currentAction == null)
+        {
+            Debug.LogWarning($"Panel {panelName} clicked, but no action is selected! Ignoring.");
+            return;
+        }
+
+        // このアクションで押せないパネルならエラー音だけ鳴らして何もしない
+        if (!IsPanelAllowedForCurrentAction(panelName))
+        {
+            Debug.Log($"Panel {panelName} is not allowed for action {currentAction.button?.name}");
+            PlayPanelNotAllowedSound();
+            return;
+        }
+
+        // 事故防止：音とランダム表示を一旦止める
+        StopActionLoop();
+        StopStoppedAfterLoop();
+        StopAudio();
+        StopRandomActionSpritesAndHideAll();
+
+        isActionActive = true;
+
+        if (stopCoroutine != null)
+        {
+            StopCoroutine(stopCoroutine);
+            stopCoroutine = null;
+            Debug.Log("Previous stopCoroutine was stopped and reset.");
+        }
+
+        // ===== 同じパネル・同じボタンをクリック（停止/再開トグル）=====
+        if (panelName == lastClickedPanel && currentConstantButtonIndex == lastButtonIndex)
+        {
+            Debug.Log($"Same panel clicked with the same action: Panel: {panelName}, Button Index: {currentConstantButtonIndex}");
+
+            if (isStopped)
+            {
+                // ===== 再開 =====
+                StopPanelConversation();
+
+                isStopped = false;
+                isActionActive = true;
+                Debug.Log("Restart action: isActionActive=true, isStopped=false");
+
+                // 停止解除で表示を戻す
+                ResumeDefaultState();
+
+                // 感動値増加を再開
+                if (currentAction.increaseAmount > 0)
+                {
+                    StartCoroutine(HandleKandoIncrease(currentAction.increaseAmount));
+                }
+
+                // 行動中ランダム表示を再開
+                if (randomSpriteCoroutine != null)
+                {
+                    StopCoroutine(randomSpriteCoroutine);
+                    randomSpriteCoroutine = null;
+                }
+
+                // ランダムスプライト（通常のみ）
+                RandomSpriteData[] selectedSprites1 = null;
+                RandomSpriteData[] selectedSprites2 = null;
+                RandomSpriteData[] selectedSprites3 = null;
+                RandomSpriteData[] selectedSprites4 = null;
+                Image image1 = null;
+                Image image2 = null;
+                Image image3 = null;
+                Image image4 = null;
+
+                if (panelName == "PanelA")
+                {
+                    selectedSprites1 = currentAction.randomActionImage1SpritesPanelA;
+                    selectedSprites2 = currentAction.randomActionImage2SpritesPanelA;
+                    selectedSprites3 = currentAction.randomActionImage3SpritesPanelA;
+                    selectedSprites4 = currentAction.randomActionImage4SpritesPanelA;
+                    image1 = currentAction.randomActionImage1PanelA;
+                    image2 = currentAction.randomActionImage2PanelA;
+                    image3 = currentAction.randomActionImage3PanelA;
+                    image4 = currentAction.randomActionImage4PanelA;
+                    Debug.Log("Restart: Using Panel A random sprites (NORMAL).");
+                }
+                else if (panelName == "PanelB")
+                {
+                    selectedSprites1 = currentAction.randomActionImage1SpritesPanelB;
+                    selectedSprites2 = currentAction.randomActionImage2SpritesPanelB;
+                    selectedSprites3 = currentAction.randomActionImage3SpritesPanelB;
+                    selectedSprites4 = currentAction.randomActionImage4SpritesPanelB;
+                    image1 = currentAction.randomActionImage1PanelB;
+                    image2 = currentAction.randomActionImage2PanelB;
+                    image3 = currentAction.randomActionImage3PanelB;
+                    image4 = currentAction.randomActionImage4PanelB;
+                    Debug.Log("Restart: Using Panel B random sprites (NORMAL).");
+                }
+
+                randomSpriteCoroutine = StartCoroutine(PlayRandomActionSprites(
+                    selectedSprites1, selectedSprites2, selectedSprites3, selectedSprites4,
+                    image1, image2, image3, image4, currentAction));
+
+                // 再開時に「その行動のループ」を再生
+                var loop = GetActionLoopClip(currentAction, panelName);
+                PlayActionLoop(loop);
+
+                // 会話があれば未再生時のみ開始（開始時に StopActionLoop される想定）
+                if (HasConversationFor(currentAction, panelName))
+                {
+                    StartConversationIfNotTriggered(panelName, currentAction);
+                }
+
+                return;
+            }
+            else
+            {
+                // ===== 停止 =====
+                StopPanelConversation(); // 停止に入る瞬間に会話コルーチンを止める
+
+                isStopped = true;
+                isActionActive = false;
+
+                // 停止に入った瞬間に行動ループ音も止める
+                StopActionLoop();
+
+                // 停止時の音
+                PlayClip(stoppedClip, stoppedMixerGroup);
+
+                // 行動中ランダム表示は停止
+                if (randomSpriteCoroutine != null)
+                {
+                    StopCoroutine(randomSpriteCoroutine);
+                    randomSpriteCoroutine = null;
+                    Debug.Log("Random sprite coroutine stopped.");
+                }
+
+                // ランダム画像を非表示（通常のみ）
+                if (panelName == "PanelA")
+                {
+                    if (currentAction.randomActionImage1PanelA != null) currentAction.randomActionImage1PanelA.gameObject.SetActive(false);
+                    if (currentAction.randomActionImage2PanelA != null) currentAction.randomActionImage2PanelA.gameObject.SetActive(false);
+                    if (currentAction.randomActionImage3PanelA != null) currentAction.randomActionImage3PanelA.gameObject.SetActive(false);
+                    if (currentAction.randomActionImage4PanelA != null) currentAction.randomActionImage4PanelA.gameObject.SetActive(false);
+                }
+                else if (panelName == "PanelB")
+                {
+                    if (currentAction.randomActionImage1PanelB != null) currentAction.randomActionImage1PanelB.gameObject.SetActive(false);
+                    if (currentAction.randomActionImage2PanelB != null) currentAction.randomActionImage2PanelB.gameObject.SetActive(false);
+                    if (currentAction.randomActionImage3PanelB != null) currentAction.randomActionImage3PanelB.gameObject.SetActive(false);
+                    if (currentAction.randomActionImage4PanelB != null) currentAction.randomActionImage4PanelB.gameObject.SetActive(false);
+                }
+
+                if (stopCoroutine == null)
+                {
+                    stopCoroutine = StartCoroutine(ShowStoppedAfterSprite());
+                }
+
+                // stopped アニメへ（通常のみ）
+                RuntimeAnimatorController stoppedController = stoppedAnimatorController;
+
+                if (centerAnimator != null && stoppedController != null)
+                {
+                    centerAnimator.runtimeAnimatorController = stoppedController;
+                    centerAnimator.Play("StoppedAnimation");
+                    PlayLeftStoppedAnimations(isAfter: false);
+                    Debug.Log("Action paused with 'StoppedAnimation' (NORMAL).");
+                }
+
+                // 停止中ランダム開始
+                StartStoppedRandomSprites(currentAction, panelName);
+
+                Debug.Log("Action paused.");
+                return;
+            }
+        }
+
+        // ===== 異なるパネル・ボタンをクリック =====
+        Debug.Log($"Different panel clicked OR different button selected: Panel: {panelName}, Button Index: {currentConstantButtonIndex}");
+
+        isStopped = false;
+        isActionActive = true;
+
+        ResumeDefaultState();
+        UpdateImageStates(panelName);
+
+        lastClickedPanel = panelName;
+        lastButtonIndex = currentConstantButtonIndex;
+        Debug.Log($"Updated lastClickedPanel to: {lastClickedPanel}, lastButtonIndex to: {lastButtonIndex}");
+
+        if (!isConstantButtonTurn)
+        {
+            Debug.LogWarning("Interaction ignored: ConstantButtonTurn is false.");
+            return;
+        }
+
+        var activeButtonData = constantButtons[currentConstantButtonIndex];
+
+        // アニメ適用（通常のみ）
+        if (panelName == "PanelA")
+        {
+            ApplyAnimatorControllers(
+                activeButtonData.area1AnimatorController,
+                activeButtonData.area1LeftUpAnimatorController,
+                activeButtonData.area1LeftDownAnimatorController
+            );
+            Debug.Log("Applied animations for PanelA (NORMAL).");
+        }
+        else if (panelName == "PanelB")
+        {
+            ApplyAnimatorControllers(
+                activeButtonData.area2AnimatorController,
+                activeButtonData.area2LeftUpAnimatorController,
+                activeButtonData.area2LeftDownAnimatorController
+            );
+            Debug.Log("Applied animations for PanelB (NORMAL).");
+        }
+
+        // 感動値増加
+        if (activeButtonData.increaseAmount > 0)
+        {
+            Debug.Log($"Starting HandleKandoIncrease for panel: {panelName}, Increase Amount: {activeButtonData.increaseAmount}");
+            StartCoroutine(HandleKandoIncrease(activeButtonData.increaseAmount));
+        }
+        else
+        {
+            Debug.LogWarning($"Increase amount for panel {panelName} is invalid ({activeButtonData.increaseAmount}).");
+        }
+
+        // ランダムスプライト開始（通常のみ）
+        RandomSpriteData[] s1 = null;
+        RandomSpriteData[] s2 = null;
+        RandomSpriteData[] s3 = null;
+        RandomSpriteData[] s4 = null;
+        Image i1 = null;
+        Image i2 = null;
+        Image i3 = null;
+        Image i4 = null;
+
+        if (panelName == "PanelA")
+        {
+            s1 = activeButtonData.randomActionImage1SpritesPanelA;
+            s2 = activeButtonData.randomActionImage2SpritesPanelA;
+            s3 = activeButtonData.randomActionImage3SpritesPanelA;
+            s4 = activeButtonData.randomActionImage4SpritesPanelA;
+            i1 = activeButtonData.randomActionImage1PanelA;
+            i2 = activeButtonData.randomActionImage2PanelA;
+            i3 = activeButtonData.randomActionImage3PanelA;
+            i4 = activeButtonData.randomActionImage4PanelA;
+            Debug.Log("Using Panel A random sprites (NORMAL).");
+        }
+        else if (panelName == "PanelB")
+        {
+            s1 = activeButtonData.randomActionImage1SpritesPanelB;
+            s2 = activeButtonData.randomActionImage2SpritesPanelB;
+            s3 = activeButtonData.randomActionImage3SpritesPanelB;
+            s4 = activeButtonData.randomActionImage4SpritesPanelB;
+            i1 = activeButtonData.randomActionImage1PanelB;
+            i2 = activeButtonData.randomActionImage2PanelB;
+            i3 = activeButtonData.randomActionImage3PanelB;
+            i4 = activeButtonData.randomActionImage4PanelB;
+            Debug.Log("Using Panel B random sprites (NORMAL).");
+        }
+
+        randomSpriteCoroutine = StartCoroutine(PlayRandomActionSprites(s1, s2, s3, s4, i1, i2, i3, i4, activeButtonData));
+
+        // 行動開始時のループは常に開始
+        var actionLoop = GetActionLoopClip(activeButtonData, panelName);
+        PlayActionLoop(actionLoop);
+
+        // 会話があるなら、未再生時のみ開始
+        if (HasConversationFor(activeButtonData, panelName))
+        {
+            StartConversationIfNotTriggered(panelName, activeButtonData);
+        }
+    }
+
+    // 変更前: void
+    // private void StartConversationIfNotTriggered(string panelName, ConstantButtonData activeButtonData)
+
+    // 変更後: bool（開始したら true）
+    private bool StartConversationIfNotTriggered(string panelName, ConstantButtonData activeButtonData)
+    {
+        // 先に「すでに進行済みか？」をチェック
+        if (IsPanelConversationTriggered(panelName, activeButtonData))
+        {
+            Debug.Log($"Conversation already triggered for panel: {panelName}, action: {GetActionKey(activeButtonData)}");
+            return false;
+        }
+
+        // A案：会話を「開始した時点」で進行済みにする（キャンセルされても繰り返さない）
+        SetPanelConversationTriggered(panelName, activeButtonData);
+
+        // 古い会話を止める（＋必要なら画像も消す）
+        StopPanelConversation();
+        // もしくは StopPanelConversation() を使わずにここで StopCoroutine だけするなら、
+        // HideAllPanelConversationImages() をここに入れる
+
+        int token = panelConversationToken; // StopPanelConversation() の中で ++ してる想定ならこうでOK
+        Debug.Log($"Starting conversation for panel: {panelName}, action: {GetActionKey(activeButtonData)} token={token}");
+
+        panelConversationCoroutine = StartCoroutine(PlayPanelSpritesWithTimer(panelName, activeButtonData, token));
+        return true;
+    }
+    /*
+    // パネルの会話が進行済みかチェック
+    private bool IsPanelConversationTriggered(string panelName)
+    {
+        // フラグが未初期化の場合は false を設定
+        if (!panelConversationFlags.ContainsKey(panelName))
+        {
+            panelConversationFlags[panelName] = false;
+        }
+        return panelConversationFlags[panelName];
+    }
+
+    // 会話進行済みとしてフラグを設定
+    private void SetPanelConversationTriggered(string panelName)
+    {
+        panelConversationFlags[panelName] = true;
+    }
+    */
+    // 各パネルの会話スプライトを順次表示する
+    private IEnumerator PlayPanelSpritesWithTimer(string panelName, ConstantButtonData activeButtonData, int token)
+    {
+        Debug.Log($"Playing conversation sprites for panel: {panelName} token={token}");
+
+        // ★開始時点で古い会話なら即終了
+        if (token != panelConversationToken) yield break;
+
+        Sprite[] useSprites = null;
+        AudioClip[] useClips = null;
+        Image[] useTargetImages = null;
+
+        // ★通常のみ
+        if (panelName == "PanelA")
+        {
+            useSprites = activeButtonData.constantSpritesPanelA;
+            useClips = activeButtonData.audioClipsPanelA;
+            useTargetImages = activeButtonData.targetImagesPanelA;
+        }
+        else if (panelName == "PanelB")
+        {
+            useSprites = activeButtonData.constantSpritesPanelB;
+            useClips = activeButtonData.audioClipsPanelB;
+            useTargetImages = activeButtonData.targetImagesPanelB;
+        }
+        else
+        {
+            Debug.LogWarning($"Unknown panel name: {panelName}");
+            yield break;
+        }
+
+        // 配列が空 or null はスキップ（ここで「進行済み」にはしない方が安全）
+        if (useSprites == null || useSprites.Length == 0)
+        {
+            Debug.LogWarning($"No sprites assigned for {panelName}. Skipping conversation.");
+            yield break;
+        }
+
+        // targetImages が無い/短いと NRE になるのでガード
+        if (useTargetImages == null || useTargetImages.Length == 0)
+        {
+            Debug.LogWarning($"No targetImages assigned for {panelName}. Skipping conversation.");
+            yield break;
+        }
+
+        bool loopPausedByVoice = false;
+
+        for (int i = 0; i < useSprites.Length; i++)
+        {
+            // ★途中で別会話が始まったら終了
+            if (token != panelConversationToken) yield break;
+
+            if (i >= useTargetImages.Length)
+            {
+                Debug.LogWarning($"targetImages length is shorter than sprites length on {panelName}. i={i}");
+                HideAllPanelConversationImages(); // ★保険
+                break;
+            }
+
+            Image targetImage = useTargetImages[i];
+            if (targetImage == null)
+            {
+                Debug.LogWarning($"Target image not assigned for index {i} on panel: {panelName}. Skipping...");
+                continue;
+            }
+
+            targetImage.gameObject.SetActive(true);
+            targetImage.sprite = useSprites[i];
+            yield return FadeIn(EnsureCanvasGroup(targetImage), constantButtonFadeDuration);
+
+            bool hasVoiceThisTurn = (useClips != null && i < useClips.Length && useClips[i] != null);
+
+            if (hasVoiceThisTurn)
+            {
+                StopActionLoop();
+                loopPausedByVoice = true;
+                PlayClip(useClips[i], constantButtonsMixerGroup);
+            }
+            else
+            {
+                if (loopPausedByVoice &&
+                    currentAction == activeButtonData &&
+                    lastClickedPanel == panelName &&
+                    isActionActive && !isStopped)
+                {
+                    var loop = GetActionLoopClip(activeButtonData, panelName);
+                    PlayActionLoop(loop);
+                }
+                loopPausedByVoice = false;
+            }
+
+            yield return new WaitForSeconds(constantButtonDisplayDuration);
+            yield return FadeOut(EnsureCanvasGroup(targetImage), constantButtonFadeDuration);
+
+            targetImage.gameObject.SetActive(false);
+        }
+
+        // ★最後まで完走した「最新会話」だけ進行済みにする
+        if (token == panelConversationToken)
+        {
+            SetPanelConversationTriggered(panelName, activeButtonData);
+
+            if (loopPausedByVoice &&
+                currentAction == activeButtonData && lastClickedPanel == panelName && isActionActive && !isStopped)
+            {
+                var loop = GetActionLoopClip(activeButtonData, panelName);
+                PlayActionLoop(loop);
+            }
+        }
+    }
+
+    private void ApplyAnimatorControllers(RuntimeAnimatorController centerController,
+                                          RuntimeAnimatorController leftUpController,
+                                          RuntimeAnimatorController leftDownController)
+    {
+        // センター画像にアニメーションを適用
+        if (centerController != null && centerAnimator != null) // センター用のアニメーターとアニメーターコンポーネントが存在する場合
+        {
+            // センターアニメーターに指定されたアニメーションコントローラーを適用
+            centerAnimator.runtimeAnimatorController = centerController;
+            // 適用したアニメーション名をログに出力
+            Debug.Log($"Applied animator to centerImage: {centerController.name}");
+        }
+
+        // 左上画像にアニメーションを適用
+        if (leftUpController != null && leftUpAnimator != null) // 左上用のアニメーターとアニメーターコンポーネントが存在する場合
+        {
+            // 左上アニメーターに指定されたアニメーションコントローラーを適用
+            leftUpAnimator.runtimeAnimatorController = leftUpController;
+            // 左上画像を表示
+            leftUpImage.gameObject.SetActive(true);
+        }
+        else // 左上用アニメーターが存在しない場合
+        {
+            // 左上画像を非表示
+            leftUpImage.gameObject.SetActive(false);
+        }
+
+        // 左下画像にアニメーションを適用
+        if (leftDownController != null && leftDownAnimator != null) // 左下用のアニメーターとアニメーターコンポーネントが存在する場合
+        {
+            // 左下アニメーターに指定されたアニメーションコントローラーを適用
+            leftDownAnimator.runtimeAnimatorController = leftDownController;
+            // 左下画像を表示
+            leftDownImage.gameObject.SetActive(true);
+        }
+        else // 左下用アニメーターが存在しない場合
+        {
+            // 左下画像を非表示
+            leftDownImage.gameObject.SetActive(false);
+        }
+    }
+
+    private void PlayLeftStoppedAnimations(bool isAfter)
+    {
+        RuntimeAnimatorController leftUpCtrl = isAfter
+            ? stoppedAfterLeftUpAnimatorController
+            : stoppedLeftUpAnimatorController;
+
+        RuntimeAnimatorController leftDownCtrl = isAfter
+            ? stoppedAfterLeftDownAnimatorController
+            : stoppedLeftDownAnimatorController;
+
+        // leftUp
+        if (leftUpAnimator != null && leftUpImage != null)
+        {
+            if (leftUpCtrl != null)
+            {
+                leftUpAnimator.runtimeAnimatorController = leftUpCtrl;
+                leftUpImage.gameObject.SetActive(true);
+                leftUpAnimator.Play(0, 0, 0f);
+            }
+            else
+            {
+                leftUpImage.gameObject.SetActive(false);
+            }
+        }
+
+        // leftDown
+        if (leftDownAnimator != null && leftDownImage != null)
+        {
+            if (leftDownCtrl != null)
+            {
+                leftDownAnimator.runtimeAnimatorController = leftDownCtrl;
+                leftDownImage.gameObject.SetActive(true);
+                leftDownAnimator.Play(0, 0, 0f);
+            }
+            else
+            {
+                leftDownImage.gameObject.SetActive(false);
+            }
+        }
+    }
+
+
+    private IEnumerator ShowStoppedAfterSprite()
+    {
+        Debug.Log($"Entering stopped state for {stoppedImageDuration} seconds.");
+        yield return new WaitForSeconds(stoppedImageDuration);
+
+        // ★Special系撤去：常に通常の stoppedAfterAnimatorController を使用
+        RuntimeAnimatorController afterController = stoppedAfterAnimatorController;
+
+        if (centerAnimator != null && afterController != null)
+        {
+            centerAnimator.runtimeAnimatorController = afterController;
+            centerAnimator.Play("StoppedAfterAnimation");
+
+            // StoppedAfterに切り替わる瞬間に stoppedClip（audioSource）を止める
+            if (audioSource != null) audioSource.Stop();
+
+            // 停止後クリップをループ再生開始
+            PlayStoppedAfterLoop(stoppedAfterClip);
+
+            // 左上/左下も停止後用へ
+            PlayLeftStoppedAnimations(isAfter: true);
+
+            // 停止後ランダム開始
+            StartStoppedAfterRandomSprites(currentAction, lastClickedPanel);
+
+            Debug.Log("Played 'StoppedAfterAnimation' (NORMAL).");
+        }
+
+        Debug.Log("Stopped state continues after 'StoppedAfterAnimation'.");
+
+        stopCoroutine = null;
+        Debug.Log("stopCoroutine reset to null.");
+    }
+
+
+    private void PlayClip(AudioClip clip, AudioMixerGroup mixerGroup)
+    {
+        // 現在再生中の音声を停止
+        audioSource.Stop();
+
+        // 再生するAudioClipが指定されている場合のみ処理を実行
+        if (clip != null)
+        {
+            // オーディオの出力先に指定されたAudioMixerGroup（ミキサーグループ）を設定
+            audioSource.outputAudioMixerGroup = mixerGroup;
+
+            // オーディオソースに再生するクリップ(AudioClip)を設定
+            audioSource.clip = clip;
+
+            // オーディオクリップを再生
+            audioSource.Play();
+        }
+    }
+
+    private void PlayActionLoop(AudioClip clip)
+    {
+        if (actionLoopAudioSource == null) return;
+
+        if (clip == null)
+        {
+            actionLoopAudioSource.Stop();
+            actionLoopAudioSource.clip = null;
+            return;
+        }
+
+        // 同じ曲を既に再生中なら何もしない
+        if (actionLoopAudioSource.isPlaying && actionLoopAudioSource.clip == clip)
+            return;
+
+        actionLoopAudioSource.outputAudioMixerGroup = constantButtonsMixerGroup; // 必要なら別MixerにしてOK
+        actionLoopAudioSource.clip = clip;
+        actionLoopAudioSource.loop = true;
+        actionLoopAudioSource.Play();
+    }
+
+    private void PlayStoppedAfterLoop(AudioClip clip)
+    {
+        if (stoppedLoopAudioSource == null) return;
+
+        if (clip == null)
+        {
+            stoppedLoopAudioSource.Stop();
+            stoppedLoopAudioSource.clip = null;
+            return;
+        }
+
+        // 同じclipを既にループ中なら何もしない
+        if (stoppedLoopAudioSource.isPlaying && stoppedLoopAudioSource.clip == clip) return;
+
+        stoppedLoopAudioSource.outputAudioMixerGroup = stoppedAfterMixerGroup; // ここは stoppedAfter 用
+        stoppedLoopAudioSource.clip = clip;
+        stoppedLoopAudioSource.loop = true;
+        stoppedLoopAudioSource.Play();
+    }
+
+    private void StopStoppedAfterLoop()
+    {
+        if (stoppedLoopAudioSource == null) return;
+        stoppedLoopAudioSource.Stop();
+        stoppedLoopAudioSource.clip = null;
+    }
+
+    private void StopActionLoop()
+    {
+        if (actionLoopAudioSource == null) return;
+        actionLoopAudioSource.Stop();
+        actionLoopAudioSource.clip = null;
+    }
+
+    private AudioClip GetActionLoopClip(ConstantButtonData action, string panelName)
+    {
+        if (action == null) return null;
+
+        if (panelName == "PanelA") return action.loopClipPanelA;
+        if (panelName == "PanelB") return action.loopClipPanelB;
+
+        return null;
+    }
+
+    private bool HasConversationFor(ConstantButtonData action, string panelName)
+    {
+        if (action == null) return false;
+
+        Sprite[] sprites = null;
+
+        if (panelName == "PanelA") sprites = action.constantSpritesPanelA;
+        else if (panelName == "PanelB") sprites = action.constantSpritesPanelB;
+
+        return sprites != null && sprites.Length > 0;
+    }
+
+
+    private void PlayPanelNotAllowedSound()
+    {
+        if (panelNotAllowedClip == null || errorAudioSource == null) return;
+
+        // ミキサー適用（不要ならこの行は省略OK）
+        errorAudioSource.outputAudioMixerGroup = panelNotAllowedMixerGroup;
+
+        // 他の音を止めずに重ねて鳴らす
+        errorAudioSource.PlayOneShot(panelNotAllowedClip);
+    }
+
+    private void StopAudio()
+    {
+        audioSource.Stop();
+
+        // ★追加：停止後ループも止める
+        StopStoppedAfterLoop();
+
+    }
+
+    // ★ここに追加するのがおすすめ（StopAudioのすぐ下）
+    private void StopAllAudioSources()
+    {
+        // 会話/効果音
+        if (audioSource != null)
+        {
+            audioSource.Stop();
+            audioSource.clip = null;
+        }
+
+        // エラー音（OneShot中なら止める）
+        if (errorAudioSource != null)
+        {
+            errorAudioSource.Stop();
+            errorAudioSource.clip = null;
+        }
+
+        // 行動ループ
+        StopActionLoop();
+
+        // StoppedAfterループ
+        StopStoppedAfterLoop();
+    }
+
+    private void StartConversationWithAudio(Sprite[] conversationSprites, AudioClip[] conversationClips, AudioMixerGroup mixerGroup, System.Action onComplete)
+    {
+        // 会話用のスプライトと音声クリップが正しく設定されているか確認
+        if (conversationSprites.Length > 0 && conversationClips.Length > 0) // 少なくとも一つのスプライトと音声クリップが存在する場合に処理を実行
+        {
+            // 会話の進行を管理するインデックスを 0 に初期化
+            currentConversationIndex = 0;
+
+            // 会話の開始: センター画像を最初のスプライトに設定
+            centerImage.sprite = conversationSprites[currentConversationIndex];
+
+            // 最初の音声クリップを指定されたミキサーグループを通じて再生
+            PlayClip(conversationClips[currentConversationIndex], mixerGroup);
+
+            // 会話の進行管理を行うコルーチンを開始
+            // 各スプライトと音声を順番に再生し、最終的に `onComplete` を実行
+            StartCoroutine(WaitForConversationEndWithAudio(conversationSprites, conversationClips, mixerGroup, onComplete));
+        }
+    }
+
+    private IEnumerator WaitForConversationEndWithAudio(Sprite[] sprites, AudioClip[] clips, AudioMixerGroup mixerGroup, System.Action onComplete)
+    {
+        // 会話が最後のスプライトに到達するまでループ
+        while (currentConversationIndex < sprites.Length - 1)
+        {
+            // ユーザーが次へ進むためのクリックイベントを待機
+            yield return new WaitUntil(() => clickAction.triggered);
+
+            // 次の会話インデックスに進める
+            currentConversationIndex++;
+
+            // センターの画像を現在のインデックスのスプライトに更新
+            centerImage.sprite = sprites[currentConversationIndex];
+
+            // 現在のインデックスに対応する音声クリップを再生し、ミキサーを適用
+            PlayClip(clips[currentConversationIndex], mixerGroup);
+        }
+
+        // ループが終了したら、最後のクリックを待機
+        yield return new WaitUntil(() => clickAction.triggered);
+
+        // 会話終了後、デフォルトスプライトに戻す
+        centerImage.sprite = defaultSprite;
+
+        // 会話が終了した際に、終了時処理 (onComplete コールバック) を呼び出す
+        onComplete?.Invoke();
+    }
+
+
+
+
+    // 会話終了後の処理を行う
+    private void EndSingleUseConversation()
+    {
+        // 会話が完了したことをデバッグログに出力
+        Debug.Log("SingleUseButton conversation completed.");
+
+        // シングルユースボタンの状態をリセットするフラグを設定
+        isSingleUseButtonTurn = false;
+
+        // 現在使用されたボタンに関連付けられた画像要素を非アクティブ化
+        foreach (var image in singleUseButtons[currentSingleUseButtonIndex].targetImages)
+        {
+            if (image != null) // image が null でないことを確認
+            {
+                // 対象の画像を非表示
+                image.gameObject.SetActive(false);
+            }
+        }
+
+        // 次に利用可能なボタンが存在するか確認する
+        currentSingleUseButtonIndex++; // 現在のボタンインデックスを進める
+        if (currentSingleUseButtonIndex < singleUseButtons.Count) // 次のボタンが存在する場合
+        {
+            // 次のボタンを有効化して表示
+            singleUseButtons[currentSingleUseButtonIndex].button.gameObject.SetActive(true);
+
+            // 有効化したボタン名をデバッグログに出力
+            Debug.Log($"Enabled SingleUse Button: {singleUseButtons[currentSingleUseButtonIndex].button.name}");
+        }
+        else // 次のボタンが存在しない場合
+        {
+            // 利用可能なシングルユースボタンはもうないことをログに出力
+            Debug.Log("No more SingleUse buttons to enable.");
+        }
+    }
+
+    private void HandleSomeButton(bool hideLeftImages = true)
+    {
+        // 現在進行中の会話（もしあれば）を停止する
+        StopCurrentConversation();
+
+        Debug.Log("Started some new action after stopping the conversation.");
+
+        // 画像の状態をリセット
+        if (hideLeftImages)
+        {
+            ResetImageStates(); // 左上/左下も消す（従来通り）
+        }
+        else
+        {
+            // 左は維持したいので何もしない
+            // （必要ならセンターだけ変える等はここで別途）
+        }
+
+        UpdateKandoTotalImage();
+    }
+
+    public Image talkImageA; // 新しく追加されたUI要素
+    public Image talkImageB; // 新しく追加されたUI要素
+
+    private Coroutine currentConversationCoroutine; // 会話の進行を管理するコルーチン
+
+    // それぞれのボタンのクリックイベントで変数を更新
+    private void HandleSingleUseButton(SingleUseButtonData buttonData)
+    {
+
+        StopRandomActionSpritesAndHideAll(); // 先頭に追加
+        // シングルユースボタンが呼び出されたことをデバッグログに出力
+        Debug.Log($"HandleSingleUseButton called for button: {buttonData.button.name}");
+
+        // 現在進行中の会話や動作を停止する（リセットのための共通処理）
+        HandleSomeButton(hideLeftImages: false);
+
+        // 現在のボタンを非アクティブ化（表示・クリック操作を無効化する）
+        buttonData.button.gameObject.SetActive(false);
+
+        // 現在進行中の会話コルーチン（もしあれば）を停止する
+        if (currentConversationCoroutine != null)
+        {
+            StopCoroutine(currentConversationCoroutine);
+        }
+
+        // ボタンに関連付けられたスプライトを指定時間表示する新しいコルーチンを開始
+        currentConversationCoroutine = StartCoroutine(PlaySingleUseSpritesWithTimer(buttonData));
+    }
+
+    private IEnumerator PlaySingleUseSpritesWithTimer(SingleUseButtonData buttonData)
+    {
+        // メソッドが呼び出されたことをデバッグログで確認
+        Debug.Log("Starting PlaySingleUseSpritesWithTimer...");
+
+        // ボタンに設定されたスプライトを順次処理するループ
+        for (int i = 0; i < buttonData.singleUseSprites.Length; i++)
+        {
+            // 現在のスプライトに対応するターゲット画像を取得
+            Image targetImage = buttonData.targetImages[i];
+            if (targetImage == null) // ターゲット画像が設定されていない場合
+            {
+                // 警告ログを出力し、このスプライトの処理をスキップ
+                Debug.LogWarning($"Target image is not assigned for index {i}, skipping...");
+                continue;
+            }
+
+            // フェードイン処理を開始
+            targetImage.gameObject.SetActive(true); // ターゲット画像を表示
+            targetImage.sprite = buttonData.singleUseSprites[i]; // 対応するスプライトを設定
+            yield return FadeIn(EnsureCanvasGroup(targetImage), singleButtonFadeDuration); // フェードインを行う
+
+            // 音声を再生
+            if (buttonData.audioClips != null && i < buttonData.audioClips.Length && buttonData.audioClips[i] != null) // 音声クリップが存在する場合
+            {
+                // 該当の音声クリップを再生
+                PlayClip(buttonData.audioClips[i], singleUseButtonsMixerGroup);
+            }
+
+            // スプライト表示の持続時間をウェイト
+            yield return new WaitForSeconds(singleButtonDisplayDuration);
+
+            // フェードアウト処理を開始
+            yield return FadeOut(EnsureCanvasGroup(targetImage), singleButtonFadeDuration);
+
+            // 最後のスプライトを非表示にする
+            if (i == buttonData.singleUseSprites.Length - 1)
+            {
+                targetImage.gameObject.SetActive(false); // ターゲット画像を非表示
+            }
+        }
+
+        // 全てのスプライト処理が終了した後、シングルユース会話を終了
+        EndSingleUseConversation();
+    }
+    private IEnumerator PlaySpritesWithTimer(SingleUseButtonData buttonData)
+    {
+        // `singleUseSprites` 配列の各スプライトを順次処理するループ
+        for (int i = 0; i < buttonData.singleUseSprites.Length; i++)
+        {
+            // 現在のスプライトに対応するターゲット画像を取得
+            Image targetImage = buttonData.targetImages[i];
+
+            // ターゲット画像がnullの場合は警告を出してスキップ
+            if (targetImage == null)
+            {
+                Debug.LogWarning($"Target image is not assigned for index {i}, skipping...");
+                continue;
+            }
+
+            // ターゲット画像を表示状態にし、対応するスプライトを設定
+            targetImage.gameObject.SetActive(true);
+            targetImage.sprite = buttonData.singleUseSprites[i];
+
+            // `CanvasGroup` を取得し、フェード用の制御を行う
+            CanvasGroup canvasGroup = EnsureCanvasGroup(targetImage);
+
+            // フェードイン操作を行い、徐々に画像を表示
+            yield return FadeIn(canvasGroup, 0.5f);
+
+            // 現在のスプライトに対応した音声クリップ���指定されている場合は再生
+            if (buttonData.audioClips != null && i < buttonData.audioClips.Length && buttonData.audioClips[i] != null)
+            {
+                PlayClip(buttonData.audioClips[i], singleUseButtonsMixerGroup);
+            }
+
+            // スプライト表示タイミングに応じて待機
+            // 1. シングルユース用の表示持続時間
+            yield return new WaitForSeconds(singleButtonDisplayDuration);
+
+            // 2. コンスタントユース用の追加表示持続時間
+            yield return new WaitForSeconds(constantButtonDisplayDuration);
+
+            // フェードアウト操作を行い、画像を徐々に非表示
+            yield return FadeOut(canvasGroup, 0.5f);
+
+            // 最後のスプライトならターゲット画像を非表示化
+            if (i == buttonData.singleUseSprites.Length - 1 && targetImage != null)
+            {
+                targetImage.gameObject.SetActive(false);
+            }
+        }
+
+        // 全てのスプライト表示とフェード処理が完了後、シングルユースの会話を終了
+        EndSingleUseConversation();
+    }
+
+
+    private Coroutine currentConstantConversationCoroutine; // 会話管理用コルーチン
+    private void HandleConstantButton(ConstantButtonData buttonData)
+    {
+        StopRandomActionSpritesAndHideAll(); // ← これを先頭に追加
+
+        // `currentAction` を設定
+        currentAction = buttonData;
+        Debug.Log($"Set currentAction: {currentAction.button.name}");
+
+        // ボタンのインデックスを取得
+        int buttonIndex = constantButtons.IndexOf(buttonData);
+
+        // インデックスが見つからない場合のエラーハンドリング
+        if (buttonIndex < 0)
+        {
+            Debug.LogError($"ButtonData ({buttonData.button.name}) not found in constantButtons list!");
+            return;
+        }
+
+        // 現在のインデックスを記録
+        currentConstantButtonIndex = buttonIndex;
+        Debug.Log($"Handling ConstantButton at index: {currentConstantButtonIndex}");
+
+        if (!isConstantButtonTurn)
+        {
+            isConstantButtonTurn = true;
+            Debug.Log("isConstantButtonTurn is now TRUE.");
+        }
+
+        // クリック済みかどうかをチェック
+        if (!constantButtonUsed.Contains(buttonData))
+        {
+            // 初回クリック時のみ実行
+            constantButtonUsed.Add(buttonData); // クリック済み記録
+            Debug.Log($"First time click for button: {buttonData.button.name}");
+
+            // 既存のコルーチンを停止
+            if (currentConstantConversationCoroutine != null)
+            {
+                StopCoroutine(currentConstantConversationCoroutine);
+            }
+
+        }
+        else
+        {
+            // クリック済みメッセージ
+            Debug.Log($"Button {buttonData.button.name} already clicked. No action taken.");
+        }
+    }
+
+    private void HandleConstantAction(ConstantButtonData buttonData)
+    {
+        Debug.Log($"HandleConstantAction called for button: {buttonData.button.name}");
+
+        // フラグを設定
+        isConstantButtonTurn = true;  // コンスタントターン開始
+        Debug.Log("isConstantButtonTurn is now TRUE.");
+
+        // 行動を実行
+        currentAction = buttonData;
+
+        // ★必須：インデックス更新
+        currentConstantButtonIndex = constantButtons.IndexOf(buttonData);
+
+
+        // ★追加：この行動で有効なパネルに合わせてカーソルの挙動を更新
+        RefreshPanelCursorEnabled();
+    }
+
+    private void HandleConstantConversation(ConstantButtonData buttonData)
+    {
+        Debug.Log($"HandleConstantConversation called for button: {buttonData.conversationButton.name}");
+
+        // 現在進行中の会話を停止
+        HandleSomeButton();
+
+        // 現在進行中の会話コルーチンを停止
+        if (currentConversationCoroutine != null)
+        {
+            StopCoroutine(currentConversationCoroutine);
+        }
+
+        // 新しい会話を開始
+        currentConversationCoroutine = StartCoroutine(PlayConstantSpritesWithTimer(buttonData));
+    }
+
+    private IEnumerator PlayConstantSpritesWithTimer(ConstantButtonData buttonData)
+    {
+        /*
+        Debug.Log("Starting PlayConstantSpritesWithTimer...");
+
+        for (int i = 0; i < buttonData.constantSprites.Length; i++)
+        {
+            Image targetImage = buttonData.targetImages[i];
+            if (targetImage == null)
+            {
+                Debug.LogWarning($"Target image is not assigned for index {i}, skipping...");
+                continue;
+            }
+
+            // フェード���ン
+            targetImage.gameObject.SetActive(true);
+            targetImage.sprite = buttonData.constantSprites[i];
+            yield return FadeIn(EnsureCanvasGroup(targetImage), constantButtonFadeDuration);
+
+            // 音声再生
+            if (buttonData.audioClips != null && i < buttonData.audioClips.Length && buttonData.audioClips[i] != null)
+            {
+                PlayClip(buttonData.audioClips[i], constantButtonsMixerGroup);
+            }
+
+            // 表示持続時間を一括適用
+            yield return new WaitForSeconds(constantButtonDisplayDuration);
+
+            // フェードアウト
+            yield return FadeOut(EnsureCanvasGroup(targetImage), constantButtonFadeDuration);
+
+            // 最後には非表示
+            if (i == buttonData.constantSprites.Length - 1)
+            {
+                targetImage.gameObject.SetActive(false);
+            }
+        }
+
+        EndConstantButtonConversation(buttonData);
+        */
+
+        // このメソッドは削除するか、以下のように修正してください
+        Debug.Log("PlayConstantSpritesWithTimer is deprecated. Use PlayPanelSpritesWithTimer instead.");
+        EndConstantButtonConversation(buttonData);
+        yield break;
+    }
+
+    // ターゲットイメージの CanvasGroup を取得、存在しない場合は追加する
+    private CanvasGroup EnsureCanvasGroup(Image image)
+    {
+        CanvasGroup canvasGroup = image.GetComponent<CanvasGroup>();
+        if (canvasGroup == null)
+        {
+            canvasGroup = image.gameObject.AddComponent<CanvasGroup>();
+        }
+        return canvasGroup;
+    }
+
+    // フェードアウト処理
+    private IEnumerator FadeOut(CanvasGroup canvasGroup, float duration)
+    {
+        float time = 0f;
+        while (time < duration)
+        {
+            time += Time.deltaTime;
+            canvasGroup.alpha = Mathf.Lerp(1f, 0f, time / duration);
+            yield return null;
+        }
+        canvasGroup.alpha = 0f;
+    }
+
+    // フェードイン処理
+    private IEnumerator FadeIn(CanvasGroup canvasGroup, float duration)
+    {
+        float time = 0f;
+        while (time < duration)
+        {
+            time += Time.deltaTime;
+            canvasGroup.alpha = Mathf.Lerp(0f, 1f, time / duration);
+            yield return null;
+        }
+        canvasGroup.alpha = 1f;
+    }
+
+    private IEnumerator FadeToBlack(float duration)
+    {
+        if (fadeCanvasGroup == null) yield break;
+
+        fadeCanvasGroup.gameObject.SetActive(true);
+        float t = 0f;
+        float start = fadeCanvasGroup.alpha;
+
+        while (t < duration)
+        {
+            t += Time.deltaTime;
+            fadeCanvasGroup.alpha = Mathf.Lerp(start, 1f, t / duration);
+            yield return null;
+        }
+        fadeCanvasGroup.alpha = 1f;
+    }
+
+    private IEnumerator FadeOutAndLoadScene(string sceneName)
+    {
+        yield return StartCoroutine(FadeToBlack(preEventFadeDuration));
+        if (preEventBlackHold > 0f) yield return new WaitForSeconds(preEventBlackHold);
+
+        SceneManager.LoadScene(sceneName);
+    }
+
+    private IEnumerator FadeFromBlack(float duration)
+    {
+        if (fadeCanvasGroup == null) yield break;
+
+        float t = 0f;
+        float start = fadeCanvasGroup.alpha;
+
+        while (t < duration)
+        {
+            t += Time.deltaTime;
+            fadeCanvasGroup.alpha = Mathf.Lerp(start, 0f, t / duration);
+            yield return null;
+        }
+        fadeCanvasGroup.alpha = 0f;
+        fadeCanvasGroup.gameObject.SetActive(false);
+    }
+
+    private void EndConstantButtonConversation(ConstantButtonData buttonData)
+    {
+        Debug.Log("Constant button conversation completed.");
+
+        foreach (var image in buttonData.targetImages)
+        {
+            if (image != null)
+            {
+                image.gameObject.SetActive(false);
+            }
+        }
+
+        if (buttonData.conversationButton != null)
+        {
+            buttonData.conversationButton.gameObject.SetActive(false);
+        }
+
+        currentConversationCoroutine = null; // 現在の会話コルーチンを解除
+    }
+    // ★ 修正: void → IEnumerator
+    private IEnumerator HandleNextScene()
+    {
+
+        // ★二重起動防止
+        if (isNextSceneTransitioning)
+            yield break;
+
+        isNextSceneTransitioning = true;
+
+        // ★押した瞬間に連打できないようにする
+        if (nextSceneButton != null)
+        {
+            nextSceneButton.interactable = false;
+            nextSceneButton.gameObject.SetActive(false);
+        }
+
+        StopRandomActionSpritesAndHideAll(); // 先頭に追加
+
+        // ★追加：停止後に遅れて鳴り出すのを防ぐ（ShowStoppedAfterSprite を止める）
+        if (stopCoroutine != null)
+        {
+            StopCoroutine(stopCoroutine);
+            stopCoroutine = null;
+        }
+
+        // ★追加：パネル会話が走ってたら止める（音が遅れて鳴る原因になる）
+        StopPanelConversation();
+
+        // ★追加：このオブジェクトの音を全部止める（前のクリップが止まらない問題の本命）
+        StopAllAudioSources();
+
+        // ★追加：停止後ループを止める（次シーン遷移に入るため）
+        StopStoppedAfterLoop();
+
+        // ★追加：スペシャル会話に入るので行動ループ音は止める
+        StopActionLoop();
+
+        Debug.Log("HandleNextScene called!");
+        // ★ nextSceneData 自体が無ければ遷移（ここだけは必須）
+        if (nextSceneData == null)
+        {
+            Debug.LogWarning("Next scene data is not set (nextSceneData is null)!");
+            yield return StartCoroutine(BlackoutAndTransition(nextSceneName));
+            yield break;
+        }
+
+
+        // ★★★ 追加: アクション状態を停止（スペシャルボタン時と同様） ★★★
+        isActionActive = false;
+
+        // ★★★ 追加: ランダムスプライト表示を停止 ★★★
+        if (randomSpriteCoroutine != null)
+        {
+            StopCoroutine(randomSpriteCoroutine);
+            randomSpriteCoroutine = null;
+            Debug.Log("Random sprite coroutine stopped due to next scene button.");
+        }
+
+        // ★★★ 追加: すべてのランダムアクション画像を非アクティブ化 ★★★
+        if (currentAction != null)
+        {
+            // パネルA - 通常時
+            if (currentAction.randomActionImage1PanelA != null)
+                currentAction.randomActionImage1PanelA.gameObject.SetActive(false);
+            if (currentAction.randomActionImage2PanelA != null)
+                currentAction.randomActionImage2PanelA.gameObject.SetActive(false);
+            if (currentAction.randomActionImage3PanelA != null)
+                currentAction.randomActionImage3PanelA.gameObject.SetActive(false);
+            if (currentAction.randomActionImage4PanelA != null)
+                currentAction.randomActionImage4PanelA.gameObject.SetActive(false);
+
+            // パネルB - 通常時
+            if (currentAction.randomActionImage1PanelB != null)
+                currentAction.randomActionImage1PanelB.gameObject.SetActive(false);
+            if (currentAction.randomActionImage2PanelB != null)
+                currentAction.randomActionImage2PanelB.gameObject.SetActive(false);
+            if (currentAction.randomActionImage3PanelB != null)
+                currentAction.randomActionImage3PanelB.gameObject.SetActive(false);
+            if (currentAction.randomActionImage4PanelB != null)
+                currentAction.randomActionImage4PanelB.gameObject.SetActive(false);
+
+
+            Debug.Log("All random action images deactivated.");
+        }
+
+        // ★★★ 追加: 会話コルーチン停止 ★★★
+        if (currentConversationCoroutine != null)
+        {
+            StopCoroutine(currentConversationCoroutine);
+            currentConversationCoroutine = null;
+        }
+
+        // ★★★ 追加: ボタン・パネルを非表示 ★★★
+        HideAllButtonsAndPanels();
+
+        // 1) 暗転
+        yield return StartCoroutine(FadeToBlack(preEventFadeDuration));
+        if (preEventBlackHold > 0f) yield return new WaitForSeconds(preEventBlackHold);
+
+        // 2) 真っ黒の間に0フレーム準備
+        PrepareNextFrame0();
+
+        // 3) 明転
+        yield return StartCoroutine(FadeFromBlack(preEventFadeDuration));
+
+        // 4) 会話本体（0はもう準備したので1から）
+        yield return StartCoroutine(PlayNextSceneConversation(startIndex: 1));
+    }
+
+    private void PrepareNextFrame0()
+    {
+        HideAllButtonsAndPanels();
+
+        if (nextSceneData == null) return;
+
+        // 0番 Animator
+        if (nextSceneData.animatorControllers != null &&
+            nextSceneData.animatorControllers.Length > 0 &&
+            nextSceneData.animatorControllers[0] != null &&
+            centerAnimator != null)
+        {
+            centerAnimator.runtimeAnimatorController = nextSceneData.animatorControllers[0];
+            centerAnimator.Play(0, 0, 0f);
+        }
+
+        // 0番 セリフ
+        if (nextSceneData.dialogueImages != null &&
+            nextSceneData.dialogueImages.Length > 0 &&
+            nextSceneData.dialogueSprites != null &&
+            nextSceneData.dialogueSprites.Length > 0 &&
+            nextSceneData.dialogueImages[0] != null &&
+            nextSceneData.dialogueSprites[0] != null)
+        {
+            var img = nextSceneData.dialogueImages[0];
+            img.sprite = nextSceneData.dialogueSprites[0];
+            img.gameObject.SetActive(true);
+
+            // 明転直後に見えるようにしておく（必要なら0にしてフェードインでもOK）
+            EnsureCanvasGroup(img).alpha = 1f;
+        }
+    }
+
+    // ★★★ 追加: ネクストシーン会話を再生 ★★★
+    private IEnumerator PlayNextSceneConversation(int startIndex = 0)
+    {
+        Debug.Log("Starting next scene conversation...");
+
+        if (nextSceneData == null)
+        {
+            Debug.LogWarning("Next scene data is not properly set up! (nextSceneData is null)");
+            EndNextSceneConversation();
+            yield break;
+        }
+
+        // ★ 会話フレーム数を「セリフ（Dialogue）」中心に決める（Animator/Audioは任意）
+        int frameCount = 0;
+
+        if (nextSceneData.dialogueSprites != null)
+            frameCount = Mathf.Max(frameCount, nextSceneData.dialogueSprites.Length);
+
+        if (nextSceneData.dialogueImages != null)
+            frameCount = Mathf.Max(frameCount, nextSceneData.dialogueImages.Length);
+
+        // 任意要素も、入っているならフレーム数に含めてOK
+        if (nextSceneData.centerSprites != null)
+            frameCount = Mathf.Max(frameCount, nextSceneData.centerSprites.Length);
+
+        if (nextSceneData.animatorControllers != null)
+            frameCount = Mathf.Max(frameCount, nextSceneData.animatorControllers.Length);
+
+        if (nextSceneData.audioClips != null)
+            frameCount = Mathf.Max(frameCount, nextSceneData.audioClips.Length);
+
+        if (nextSceneData.frameDurations != null)
+            frameCount = Mathf.Max(frameCount, nextSceneData.frameDurations.Length);
+
+        // ★追加：左上/左下もフレーム数に含める（任意要素）
+        if (nextSceneData.leftUpAnimatorControllers != null)
+            frameCount = Mathf.Max(frameCount, nextSceneData.leftUpAnimatorControllers.Length);
+
+        if (nextSceneData.leftDownAnimatorControllers != null)
+            frameCount = Mathf.Max(frameCount, nextSceneData.leftDownAnimatorControllers.Length);
+
+        if (frameCount <= 0)
+        {
+            Debug.LogWarning("NextSceneData has no frames (no dialogueSprites/images/centerSprites/controllers/clips/durations).");
+            EndNextSceneConversation();
+            yield break;
+        }
+
+        // ★startIndex の安全化
+        if (startIndex < 0) startIndex = 0;
+        if (startIndex >= frameCount)
+        {
+            Debug.LogWarning($"PlayNextSceneConversation: startIndex({startIndex}) >= frameCount({frameCount}).");
+            EndNextSceneConversation();
+            yield break;
+        }
+
+        // 各フレームを順次処理（★ここが変更点：startIndex から回す）
+        for (int i = startIndex; i < frameCount; i++)
+        {
+            // 1) Animator（あれば適用）
+            if (nextSceneData.animatorControllers != null &&
+                i < nextSceneData.animatorControllers.Length &&
+                nextSceneData.animatorControllers[i] != null &&
+                centerAnimator != null)
+            {
+                centerAnimator.runtimeAnimatorController = nextSceneData.animatorControllers[i];
+                centerAnimator.Play(0, 0, 0);
+                Debug.Log($"Applied animator controller for next scene index {i}");
+            }
+
+            // 左上 Animator
+            if (nextSceneData.leftUpAnimatorControllers != null &&
+                i < nextSceneData.leftUpAnimatorControllers.Length &&
+                nextSceneData.leftUpAnimatorControllers[i] != null &&
+                leftUpAnimator != null &&
+                leftUpImage != null)
+            {
+                leftUpAnimator.runtimeAnimatorController = nextSceneData.leftUpAnimatorControllers[i];
+                leftUpImage.gameObject.SetActive(true);
+                leftUpAnimator.Play(0, 0, 0f);
+            }
+
+            // 左下 Animator
+            if (nextSceneData.leftDownAnimatorControllers != null &&
+                i < nextSceneData.leftDownAnimatorControllers.Length &&
+                nextSceneData.leftDownAnimatorControllers[i] != null &&
+                leftDownAnimator != null &&
+                leftDownImage != null)
+            {
+                leftDownAnimator.runtimeAnimatorController = nextSceneData.leftDownAnimatorControllers[i];
+                leftDownImage.gameObject.SetActive(true);
+                leftDownAnimator.Play(0, 0, 0f);
+            }
+
+            // 2) セリフ画像（Image & Sprite が両方あるフレームだけ表示）
+            Image currentDialogueImage = null;
+            if (nextSceneData.dialogueImages != null && i < nextSceneData.dialogueImages.Length)
+            {
+                currentDialogueImage = nextSceneData.dialogueImages[i];
+            }
+
+            Sprite currentDialogueSprite = null;
+            if (nextSceneData.dialogueSprites != null && i < nextSceneData.dialogueSprites.Length)
+            {
+                currentDialogueSprite = nextSceneData.dialogueSprites[i];
+            }
+
+            bool showingDialogue = false;
+            if (currentDialogueImage != null && currentDialogueSprite != null)
+            {
+                currentDialogueImage.sprite = currentDialogueSprite;
+                currentDialogueImage.gameObject.SetActive(true);
+
+                // フェードイン
+                yield return FadeIn(EnsureCanvasGroup(currentDialogueImage), singleButtonFadeDuration);
+                showingDialogue = true;
+            }
+
+            // 3) centerSprites（任意：あれば上書き）
+            if (nextSceneData.centerSprites != null &&
+                i < nextSceneData.centerSprites.Length &&
+                nextSceneData.centerSprites[i] != null &&
+                centerImage != null)
+            {
+                centerImage.sprite = nextSceneData.centerSprites[i];
+            }
+
+            // 4) 音声（任意：あれば再生）
+            if (nextSceneData.audioClips != null &&
+                i < nextSceneData.audioClips.Length &&
+                nextSceneData.audioClips[i] != null)
+            {
+                PlayClip(nextSceneData.audioClips[i], nextSceneMixerGroup);
+            }
+
+            // 5) 表示時間
+            float displayDuration = nextSceneData.defaultFrameDuration;
+            if (nextSceneData.frameDurations != null &&
+                i < nextSceneData.frameDurations.Length &&
+                nextSceneData.frameDurations[i] > 0f)
+            {
+                displayDuration = nextSceneData.frameDurations[i];
+            }
+
+            yield return new WaitForSeconds(displayDuration);
+
+            // 6) セリフ画像をフェードアウト
+            if (showingDialogue && currentDialogueImage != null)
+            {
+                yield return FadeOut(EnsureCanvasGroup(currentDialogueImage), singleButtonFadeDuration);
+                currentDialogueImage.gameObject.SetActive(false);
+            }
+
+            if (i < frameCount - 1)
+            {
+                yield return new WaitForSeconds(0.2f);
+            }
+        }
+
+        EndNextSceneConversation();
+    }
+
+    // ★★★ 追加: ネクストシーン会話終了処理 ★★★
+    private void EndNextSceneConversation()
+    {
+        Debug.Log("Next scene conversation completed. Starting transition...");
+
+        // すべてのセリフ画像を非表示
+        if (nextSceneData != null && nextSceneData.dialogueImages != null)
+        {
+            foreach (var dialogueImg in nextSceneData.dialogueImages)
+            {
+                if (dialogueImg != null)
+                {
+                    dialogueImg.gameObject.SetActive(false);
+                }
+            }
+        }
+
+        // 音停止
+        StopAudio();
+        StopActionLoop();
+        StopStoppedAfterLoop();
+
+        // ★2段目暗転 → 即ロード（BlackoutAndTransitionは使わない）
+        StartCoroutine(FadeOutAndLoadScene(nextSceneName));
+    }
+
+    private void StopCurrentConversation()
+    {
+        if (currentConversationCoroutine != null)
+        {
+            StopCoroutine(currentConversationCoroutine);
+            currentConversationCoroutine = null;
+            Debug.Log("Current conversation stopped.");
+        }
+    }
+
+    private void SetPanelVisibility(bool isVisible)
+    {
+        if (clickArea1 != null)
+        {
+            clickArea1.gameObject.SetActive(isVisible); // PanelA の表示を切り替え
+        }
+        if (clickArea2 != null)
+        {
+            clickArea2.gameObject.SetActive(isVisible); // PanelB の表示を切り替え
+        }
+        Debug.Log($"Panel visibility set to: {isVisible}");
+    }
+
+    private IEnumerator HandleKandoIncrease(int increaseAmount)
+    {
+        Debug.Log($"HandleKandoIncrease started. isActionActive={isActionActive}, isStopped={isStopped}, kandoValue={kandoValue}, kandoThreshold={kandoThreshold}");
+
+        while (isActionActive && !isStopped && kandoValue < kandoThreshold)
+        {
+            yield return new WaitForSeconds(kandoIncreaseRate);
+
+            // 感動値を増加させる
+            kandoValue += increaseAmount;
+
+            // 感動値に応じた画像を更新
+            UpdateKandoTotalImage();
+
+
+            Debug.Log($"Updated KandoValue to: {kandoValue}, isActionActive={isActionActive}, isStopped={isStopped}");
+
+            // 閾値に達したらボタンを有効化する
+            if (kandoValue >= kandoThreshold)
+            {
+                kandoValue = kandoThreshold; // 最大値にキャップ
+                Debug.Log($"Reached kandoThreshold! kandoValue={kandoValue}");
+                ShowNextSceneButton();
+                break;
+            }
+        }
+
+        Debug.Log($"HandleKandoIncrease ended. Final kandoValue: {kandoValue}, isActionActive={isActionActive}, isStopped={isStopped}");
+    }
+
+    private IEnumerator PlayRandomActionSprites(
+        RandomSpriteData[] randomSpritesImage1,
+        RandomSpriteData[] randomSpritesImage2,
+        RandomSpriteData[] randomSpritesImage3,
+        RandomSpriteData[] randomSpritesImage4,
+        Image randomImage1,
+        Image randomImage2,
+        Image randomImage3,
+        Image randomImage4,
+        ConstantButtonData buttonData)
+    {
+        bool hasImage1Sprites = randomSpritesImage1 != null && randomSpritesImage1.Length > 0;
+        bool hasImage2Sprites = randomSpritesImage2 != null && randomSpritesImage2.Length > 0;
+        bool hasImage3Sprites = randomSpritesImage3 != null && randomSpritesImage3.Length > 0;
+        bool hasImage4Sprites = randomSpritesImage4 != null && randomSpritesImage4.Length > 0;
+
+        if (!hasImage1Sprites && !hasImage2Sprites && !hasImage3Sprites && !hasImage4Sprites)
+        {
+            Debug.LogWarning("No random action sprites assigned for any image.");
+            yield break;
+        }
+
+        // ★重要：開始前にフィールドを初期化（前回の参照を残さない）
+        randomImage1Coroutine = null;
+        randomImage2Coroutine = null;
+        randomImage3Coroutine = null;
+        randomImage4Coroutine = null;
+
+        // ★子コルーチンを起動し、フィールドに保存する
+        if (hasImage1Sprites && randomImage1 != null)
+        {
+            randomImage1Coroutine = StartCoroutine(PlayRandomSpritesForImageWithDelay(
+                randomSpritesImage1, randomImage1, buttonData, "Image1",
+                buttonData.randomActionImage1StartDelay, buttonData.randomActionImage1Duration));
+        }
+
+        if (hasImage2Sprites && randomImage2 != null)
+        {
+            randomImage2Coroutine = StartCoroutine(PlayRandomSpritesForImageWithDelay(
+                randomSpritesImage2, randomImage2, buttonData, "Image2",
+                buttonData.randomActionImage2StartDelay, buttonData.randomActionImage2Duration));
+        }
+
+        if (hasImage3Sprites && randomImage3 != null)
+        {
+            randomImage3Coroutine = StartCoroutine(PlayRandomSpritesForImageWithDelay(
+                randomSpritesImage3, randomImage3, buttonData, "Image3",
+                buttonData.randomActionImage3StartDelay, buttonData.randomActionImage3Duration));
+        }
+
+        if (hasImage4Sprites && randomImage4 != null)
+        {
+            randomImage4Coroutine = StartCoroutine(PlayRandomSpritesForImageWithDelay(
+                randomSpritesImage4, randomImage4, buttonData, "Image4",
+                buttonData.randomActionImage4StartDelay, buttonData.randomActionImage4Duration));
+        }
+
+        // ★「子が終わるまで待つ」もフィールドで待つ
+        if (randomImage1Coroutine != null) yield return randomImage1Coroutine;
+        if (randomImage2Coroutine != null) yield return randomImage2Coroutine;
+        if (randomImage3Coroutine != null) yield return randomImage3Coroutine;
+        if (randomImage4Coroutine != null) yield return randomImage4Coroutine;
+
+        Debug.Log("Random action sprite display stopped.");
+    }
+    // ★★★ 修正: 表示時間をパラメータで受け取る ★★★
+    private IEnumerator PlayRandomSpritesForImageWithDelay(
+        RandomSpriteData[] randomSprites,
+        Image targetImage,
+        ConstantButtonData buttonData,
+        string imageName,
+        float startDelay,
+        float displayDuration)  // ★ 追加: 個別の表示時間
+    {
+        if (randomSprites == null || randomSprites.Length == 0)
+            yield break;
+
+        // 開始遅延
+        if (startDelay > 0)
+        {
+            Debug.Log($"{imageName} will start after {startDelay} seconds delay.");
+            yield return new WaitForSeconds(startDelay);
+        }
+
+        CanvasGroup canvasGroup = EnsureCanvasGroup(targetImage);
+
+        List<int> spriteIndices = new List<int>();
+        for (int i = 0; i < randomSprites.Length; i++)
+        {
+            spriteIndices.Add(i);
+        }
+
+        Debug.Log($"Starting random sprite display for {imageName} (Duration: {displayDuration}s)...");
+
+        while ((isActionActive && !isStopped) || isStoppedRandomActive)
+        {
+            // シャッフル
+            for (int i = 0; i < spriteIndices.Count; i++)
+            {
+                int temp = spriteIndices[i];
+                int randomIndex = Random.Range(i, spriteIndices.Count);
+                spriteIndices[i] = spriteIndices[randomIndex];
+                spriteIndices[randomIndex] = temp;
+            }
+
+            foreach (int index in spriteIndices)
+            {
+                if ((!isActionActive || isStopped) && !isStoppedRandomActive)
+                    break;
+
+                RandomSpriteData spriteData = randomSprites[index];
+
+                if (spriteData.sprite == null)
+                {
+                    Debug.LogWarning($"Sprite at index {index} ({imageName}) is null!");
+                    continue;
+                }
+
+                // スプライトを設定してアクティブ化
+                targetImage.sprite = spriteData.sprite;
+                targetImage.gameObject.SetActive(true);
+
+                // フェードイン
+                yield return FadeIn(canvasGroup, buttonData.randomSpriteFadeInDuration);
+
+                // ★★★ 修正: 個別の表示時間を使用 ★★★
+                yield return new WaitForSeconds(displayDuration);
+
+                // フェードアウト
+                yield return FadeOut(canvasGroup, buttonData.randomSpriteFadeOutDuration);
+
+                // 表示終了後に非アクティブ化
+                targetImage.gameObject.SetActive(false);
+            }
+        }
+
+        Debug.Log($"Random sprite display for {imageName} stopped.");
+    }
+
+    // ★★★ 修正: nextSceneButton 表示条件を「感動値だけ」にする ★★★
+    private void ShowNextSceneButton()
+    {
+        if (nextSceneButton == null)
+        {
+            Debug.LogWarning("Next scene button is not assigned!");
+            return;
+        }
+
+        bool kandoOk = kandoValue >= kandoThreshold;
+
+        if (kandoOk)
+        {
+            nextSceneButton.gameObject.SetActive(true);
+            Debug.Log($"Next scene button shown! kando={kandoValue}/{kandoThreshold}");
+        }
+        else
+        {
+            Debug.Log($"Next scene button NOT shown. kando={kandoValue}/{kandoThreshold}");
+        }
+    }
+
+    private IEnumerator BlackoutAndTransition(string sceneName)
+    {
+        GameObject blackoutObject = new GameObject("BlackoutCanvas");
+        RectTransform rectTransform = blackoutObject.AddComponent<RectTransform>();
+        rectTransform.sizeDelta = new Vector2(Screen.width, Screen.height);
+        rectTransform.anchorMin = Vector2.zero;
+        rectTransform.anchorMax = Vector2.one;
+        Canvas canvas = blackoutObject.AddComponent<Canvas>();
+        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+
+        CanvasGroup blackoutCanvas = blackoutObject.AddComponent<CanvasGroup>();
+        Image blackoutImage = blackoutObject.AddComponent<Image>();
+        blackoutImage.color = Color.black;
+
+        float elapsed = 0f;
+        while (elapsed < fadeDuration)
+        {
+            elapsed += Time.deltaTime;
+            blackoutCanvas.alpha = Mathf.Lerp(0f, 1f, elapsed / fadeDuration);
+            yield return null;
+        }
+
+        yield return new WaitForSeconds(fadeDuration);
+        SceneManager.LoadScene(sceneName);
+    }
+
+    private void UpdateKandoTotalImage()
+    {
+        int spriteIndex = Mathf.Clamp(kandoValue / 10, 0, kandoTotalSprites.Length - 1);
+        kandoTotalImage.sprite = kandoTotalSprites[spriteIndex];
+        Debug.Log($"Updated KandoTotalImage. Current KandoValue: {kandoValue}, SpriteIndex: {spriteIndex}, " +
+                  $"Assigned Sprite: {kandoTotalSprites[spriteIndex]?.name ?? "missing sprite!"}");
+    }
+
+
+
+
+    // ★★★ 追加: スペシャル会話中にすべてのボタン・パネルを非表示 ★★★
+    private void HideAllButtonsAndPanels()
+    {
+        // シングルユースボタンを非表示
+        foreach (var buttonData in singleUseButtons)
+        {
+            if (buttonData.button != null)
+            {
+                buttonData.button.gameObject.SetActive(false);
+            }
+        }
+
+        // コンスタントボタンを非表示
+        foreach (var buttonData in constantButtons)
+        {
+            if (buttonData.button != null)
+            {
+                buttonData.button.gameObject.SetActive(false);
+            }
+            if (buttonData.conversationButton != null)
+            {
+                buttonData.conversationButton.gameObject.SetActive(false);
+            }
+        }
+
+        // パネルA・B を非表示
+        if (clickArea1 != null)
+        {
+            clickArea1.gameObject.SetActive(false);
+        }
+        if (clickArea2 != null)
+        {
+            clickArea2.gameObject.SetActive(false);
+        }
+
+        Debug.Log("All buttons and panels hidden for special conversation.");
+    }
+
+    private void HideAllPanelConversationImages()
+    {
+        foreach (var action in constantButtons)
+        {
+            if (action == null) continue;
+
+            HideImageArray(action.targetImagesPanelA);
+            HideImageArray(action.targetImagesPanelB);
+
+        }
+    }
+
+    private void HideImageArray(Image[] arr)
+    {
+        if (arr == null) return;
+        foreach (var img in arr)
+        {
+            if (img == null) continue;
+            img.gameObject.SetActive(false);
+
+            // フェード途中で止まった時の保険（必要なら）
+            var cg = img.GetComponent<CanvasGroup>();
+            if (cg != null) cg.alpha = 0f;
+        }
+    }
+
+
+    // ★★★ 追加: スペシャル会話終了後にすべてのボタン・パネルを表示 ★★★
+    private void ShowAllButtonsAndPanels()
+    {
+        // シングルユースボタンを表示（現在有効なボタンのみ）
+        if (currentSingleUseButtonIndex < singleUseButtons.Count)
+        {
+            if (singleUseButtons[currentSingleUseButtonIndex].button != null)
+            {
+                singleUseButtons[currentSingleUseButtonIndex].button.gameObject.SetActive(true);
+            }
+        }
+
+        // コンスタントボタンを表示（スペシャル後解放の条件込み）
+        RefreshConstantButtonsVisibility();
+
+        // パネルA・B を表示
+        if (clickArea1 != null)
+        {
+            clickArea1.gameObject.SetActive(true);
+        }
+        if (clickArea2 != null)
+        {
+            clickArea2.gameObject.SetActive(true);
+        }
+
+        Debug.Log("All buttons and panels shown after special conversation.");
+
+        // ★追加：復帰時にパネルカーソル状態を再同期
+        RefreshPanelCursorEnabled();
+    }
+
+
+}
+
+
+
+[System.Serializable]
+public class SingleUseButtonData
+{
+    public Button button;
+    public Sprite[] singleUseSprites;
+    public AudioClip[] audioClips;
+
+    public Image[] targetImages;
+}
+
+
+[System.Serializable]
+public class ConstantButtonData
+{
+    [Header("Random Action Sprites (Stopped State)")]
+    public RandomSpriteData[] stoppedRandomImage1Sprites;
+    public RandomSpriteData[] stoppedRandomImage2Sprites;
+    public RandomSpriteData[] stoppedRandomImage3Sprites;
+    public RandomSpriteData[] stoppedRandomImage4Sprites;
+
+    [Header("Random Action Sprites (Stopped-After State)")]
+    public RandomSpriteData[] stoppedAfterRandomImage1Sprites;
+    public RandomSpriteData[] stoppedAfterRandomImage2Sprites;
+    public RandomSpriteData[] stoppedAfterRandomImage3Sprites;
+    public RandomSpriteData[] stoppedAfterRandomImage4Sprites;
+
+    public Button button;
+    public Button conversationButton;
+    public int increaseAmount;
+
+    // ===== パネル別の会話スプライト・音声・画像 =====
+    [Header("Panel A Conversation (Before Special)")]
+    public Sprite[] constantSpritesPanelA;
+    public AudioClip[] audioClipsPanelA;
+    public Image[] targetImagesPanelA;
+
+    [Header("Panel B Conversation (Before Special)")]
+    public Sprite[] constantSpritesPanelB;
+    public AudioClip[] audioClipsPanelB;
+    public Image[] targetImagesPanelB;
+
+
+    // ===== AnimatorController =====
+
+    public RuntimeAnimatorController area1AnimatorController;
+    public RuntimeAnimatorController area2AnimatorController;
+    public RuntimeAnimatorController area1LeftUpAnimatorController;
+    public RuntimeAnimatorController area1LeftDownAnimatorController;
+    public RuntimeAnimatorController area2LeftUpAnimatorController;
+    public RuntimeAnimatorController area2LeftDownAnimatorController;
+
+
+    public Image[] targetImages;
+
+    // ConstantButtonData に追加（Inspectorで設定したいので public）
+    [Header("Visibility")]
+    public bool showOnlyAfterSpecial = false; // true: スペシャル後に表示 / false: 最初から表示
+
+    // ★ここに追加（この1行だけ）
+    public bool showOnlyAfterSpecial2 = false; // true: スペシャル2後に表示 / false: 最初から表示
+
+    [Header("Panel Availability")]
+    public bool allowPanelA = true;
+    public bool allowPanelB = true;
+
+    [Header("Action Loop Audio (no conversation, while acting)")]
+    public AudioClip loopClipPanelA;         // スペシャル前・PanelA
+    public AudioClip loopClipPanelB;         // スペシャル前・PanelB
+
+
+
+    // ★★★ ランダムアクション（パネルA - 通常時）- 4種類の画像 ★★★
+    [Header("Random Action Sprites (Panel A - Before Special)")]
+    public RandomSpriteData[] randomActionImage1SpritesPanelA;
+    public Image randomActionImage1PanelA;
+
+    public RandomSpriteData[] randomActionImage2SpritesPanelA;
+    public Image randomActionImage2PanelA;
+
+    public RandomSpriteData[] randomActionImage3SpritesPanelA;
+    public Image randomActionImage3PanelA;
+
+    public RandomSpriteData[] randomActionImage4SpritesPanelA;
+    public Image randomActionImage4PanelA;
+
+    // ★★★ ランダムアクション（パネルB - 通常時）- 4種類の画像 ★★★
+    [Header("Random Action Sprites (Panel B - Before Special)")]
+    public RandomSpriteData[] randomActionImage1SpritesPanelB;
+    public Image randomActionImage1PanelB;
+
+    public RandomSpriteData[] randomActionImage2SpritesPanelB;
+    public Image randomActionImage2PanelB;
+
+    public RandomSpriteData[] randomActionImage3SpritesPanelB;
+    public Image randomActionImage3PanelB;
+
+    public RandomSpriteData[] randomActionImage4SpritesPanelB;
+    public Image randomActionImage4PanelB;
+
+
+
+    // ★★★ 追加: ランダムアクション用の共通設定 ★★★
+    [Header("Random Action Sprites - Common Settings")]
+    public float randomSpriteFadeInDuration = 0.5f;
+    public float randomSpriteFadeOutDuration = 0.5f;
+
+    // ★★★ 追加: 各画像の表示開始遅延時間 ★★★
+    [Header("Random Action Images - Start Delay")]
+    public float randomActionImage1StartDelay = 0.0f;
+    public float randomActionImage2StartDelay = 0.5f;
+    public float randomActionImage3StartDelay = 1.0f;
+    public float randomActionImage4StartDelay = 1.5f;
+
+    // ★★★ 追加: 各画像の表示時間（個別設定） ★★★
+    [Header("Random Action Images - Display Duration")]
+    public float randomActionImage1Duration = 2.0f;  // Image1の表示時間
+    public float randomActionImage2Duration = 2.0f;  // Image2の表示時間
+    public float randomActionImage3Duration = 2.0f;  // Image3の表示時間
+    public float randomActionImage4Duration = 2.0f;  // Image4の表示時間
+
+
+    // ★追加：パネル会話専用（constant会話）のコルーチン参照
+    private Coroutine panelConversationCoroutine = null;
+
+    // ★追加：会話の世代ID（古い会話を途中終了させる）
+    private int panelConversationToken = 0;
+
+}
+
+[System.Serializable]
+public class RandomSpriteData
+{
+    public Sprite sprite; // 表示するスプライト
+}
+
+[System.Serializable]
+public class OpeningTurnData
+{
+    public RuntimeAnimatorController animatorController; // ターンごとのアニメーションコントローラー
+    public Sprite conversationSprite; // 会話スプライト
+    public Image conversationImage; // 会話スプライトを表示するための画像オブジェクト
+    public float displayDuration = 2.0f; // ターンの表示秒数
+    public AudioClip audioClip; // ターンごとの音声クリップ
+}
+
+
+
+// ★★★ 追加: ネクストシーン用のデータクラス ★★★
+[System.Serializable]
+public class NextSceneData
+{
+    [Header("Next Scene Conversation")]
+    public Sprite[] dialogueSprites;
+    public Image[] dialogueImages;
+    public Sprite[] centerSprites;
+    public RuntimeAnimatorController[] animatorControllers;
+    public AudioClip[] audioClips;
+
+    // ★追加：左上/左下アニメ（フレームごと）
+    [Header("Left Animations (per frame)")]
+    public RuntimeAnimatorController[] leftUpAnimatorControllers;
+    public RuntimeAnimatorController[] leftDownAnimatorControllers;
+
+    [Header("Display Timing")]
+    public float[] frameDurations;
+    public float defaultFrameDuration = 1.0f;
+}
+
