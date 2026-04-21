@@ -18,14 +18,14 @@ public class OsawariGameController : MonoBehaviour
     public Image manCrotchImage;
     public Image subImage;
 
-    [Header("Touch Area Buttons")]
-    public Button faceAreaButton;
-    public Button rightBreastAreaButton;
-    public Button leftBreastAreaButton;
-    public Button crotchAreaButton;
+    [Header("Touch Area Input Handlers")]
+    public TouchAreaInputHandler faceAreaInputHandler;
+    public TouchAreaInputHandler rightBreastAreaInputHandler;
+    public TouchAreaInputHandler leftBreastAreaInputHandler;
+    public TouchAreaInputHandler crotchAreaInputHandler;
 
-    [Header("Action Buttons")]
-    public List<ConstantButtonData> constantButtons = new List<ConstantButtonData>();
+    [Header("Area Input Actions (4 Areas x Left/Right/Long)")]
+    public List<AreaInputActionData> areaInputActions = new List<AreaInputActionData>();
 
     [Header("Controls")]
     public Button autoToggleButton;
@@ -161,37 +161,6 @@ public class OsawariGameController : MonoBehaviour
             nextSceneButton.onClick.AddListener(HandleNextSceneButton);
         }
 
-        if (faceAreaButton != null)
-        {
-            faceAreaButton.onClick.AddListener(() => HandleAreaClick(TouchArea.Face));
-        }
-
-        if (rightBreastAreaButton != null)
-        {
-            rightBreastAreaButton.onClick.AddListener(() => HandleAreaClick(TouchArea.RightBreast));
-        }
-
-        if (leftBreastAreaButton != null)
-        {
-            leftBreastAreaButton.onClick.AddListener(() => HandleAreaClick(TouchArea.LeftBreast));
-        }
-
-        if (crotchAreaButton != null)
-        {
-            crotchAreaButton.onClick.AddListener(() => HandleAreaClick(TouchArea.Crotch));
-        }
-
-        foreach (var action in constantButtons)
-        {
-            if (action?.button == null)
-            {
-                continue;
-            }
-
-            ConstantButtonData capturedAction = action;
-            capturedAction.button.onClick.AddListener(() => HandleConstantActionClick(capturedAction));
-        }
-
         foreach (var buttonData in singleUseButtons)
         {
             if (buttonData?.button == null)
@@ -217,15 +186,21 @@ public class OsawariGameController : MonoBehaviour
         TryStartOpeningConversation();
     }
 
-    // Inspector helper: assign this from each touch-area button if you prefer explicit event wiring.
+    // Legacy helper keeps existing references working; left click behavior is used.
     public void HandleAreaClick(TouchArea area)
+    {
+        HandleAreaInput(area, AreaInputTrigger.LeftClick);
+    }
+
+    public void HandleAreaInput(TouchArea area, AreaInputTrigger trigger)
     {
         if (IsGameplayInputBlocked())
         {
             return;
         }
 
-        if (currentAction == null)
+        ConstantButtonData action = ResolveAreaInputAction(area, trigger);
+        if (action == null)
         {
             return;
         }
@@ -235,12 +210,16 @@ public class OsawariGameController : MonoBehaviour
             ExitStoppedState();
         }
 
+        currentAction = action;
         currentArea = area;
-        StartOrUpdateSlot(currentAction, area);
+
+        AreaPlayMode? forcedMode = trigger == AreaInputTrigger.LongPress ? AreaPlayMode.AutoOnly : (AreaPlayMode?)null;
+        StartOrUpdateSlot(action, area, forcedMode);
         ApplyPose();
         StartValueTickerIfNeeded();
         StartRandomOnomatopoeiaIfNeeded();
-        TryPlayAreaConversation(currentAction, area);
+        TryPlayAreaConversation(action, area);
+        RefreshSpeedDebugInfo();
     }
 
     public void HandleConstantActionClick(ConstantButtonData action)
@@ -1080,7 +1059,31 @@ public class OsawariGameController : MonoBehaviour
         }
     }
 
-    private void StartOrUpdateSlot(ConstantButtonData action, TouchArea area)
+    private ConstantButtonData ResolveAreaInputAction(TouchArea area, AreaInputTrigger trigger)
+    {
+        if (areaInputActions == null)
+        {
+            return null;
+        }
+
+        for (int i = 0; i < areaInputActions.Count; i++)
+        {
+            AreaInputActionData candidate = areaInputActions[i];
+            if (candidate == null)
+            {
+                continue;
+            }
+
+            if (candidate.area == area && candidate.trigger == trigger)
+            {
+                return candidate.action;
+            }
+        }
+
+        return null;
+    }
+
+    private void StartOrUpdateSlot(ConstantButtonData action, TouchArea area, AreaPlayMode? forcedMode = null)
     {
         if (action == null)
         {
@@ -1102,7 +1105,7 @@ public class OsawariGameController : MonoBehaviour
 
         MenSlot targetSlot = action.targetMenSlot;
         SlotRuntimeState state = slotStates[targetSlot];
-        AreaPlayMode mode = GetAreaPlayMode(action, area);
+        AreaPlayMode mode = forcedMode ?? GetAreaPlayMode(action, area);
         bool areaChanged = !state.area.HasValue || state.area.Value != area;
         bool actionChanged = state.action != action;
 
@@ -1531,25 +1534,10 @@ public class OsawariGameController : MonoBehaviour
     {
         bool gameplayEnabled = !IsGameplayInputBlocked();
 
-        if (faceAreaButton != null)
-        {
-            faceAreaButton.interactable = gameplayEnabled;
-        }
-
-        if (rightBreastAreaButton != null)
-        {
-            rightBreastAreaButton.interactable = gameplayEnabled;
-        }
-
-        if (leftBreastAreaButton != null)
-        {
-            leftBreastAreaButton.interactable = gameplayEnabled;
-        }
-
-        if (crotchAreaButton != null)
-        {
-            crotchAreaButton.interactable = gameplayEnabled;
-        }
+        SetAreaInputEnabled(faceAreaInputHandler, gameplayEnabled);
+        SetAreaInputEnabled(rightBreastAreaInputHandler, gameplayEnabled);
+        SetAreaInputEnabled(leftBreastAreaInputHandler, gameplayEnabled);
+        SetAreaInputEnabled(crotchAreaInputHandler, gameplayEnabled);
 
         if (autoToggleButton != null)
         {
@@ -1571,16 +1559,6 @@ public class OsawariGameController : MonoBehaviour
             nextSceneButton.interactable = gameplayEnabled;
         }
 
-        foreach (var action in constantButtons)
-        {
-            if (action?.button == null)
-            {
-                continue;
-            }
-
-            action.button.interactable = gameplayEnabled;
-        }
-
         foreach (var singleUse in singleUseButtons)
         {
             if (singleUse?.button == null)
@@ -1595,6 +1573,14 @@ public class OsawariGameController : MonoBehaviour
         if (stopActionButton != null)
         {
             stopActionButton.interactable = !isGameplayInputLocked;
+        }
+    }
+
+    private static void SetAreaInputEnabled(TouchAreaInputHandler handler, bool enabled)
+    {
+        if (handler != null)
+        {
+            handler.SetInputEnabled(enabled);
         }
     }
 
@@ -1705,6 +1691,13 @@ public enum MenSlot
     Crotch
 }
 
+public enum AreaInputTrigger
+{
+    LeftClick,
+    RightClick,
+    LongPress
+}
+
 public enum ConversationSpeaker
 {
     Male,
@@ -1782,7 +1775,6 @@ public class StoppedVisualSet
 public class ConstantButtonData
 {
     public string actionName;
-    public Button button;
     public MenSlot targetMenSlot = MenSlot.Mouth;
     public bool onlyExclusive;
 
@@ -1810,6 +1802,14 @@ public class ConstantButtonData
     [Header("Optional Random Onomatopoeia")]
     public float randomSpriteInterval = 0.6f;
     public List<RandomSpriteChannel> randomChannels = new List<RandomSpriteChannel>();
+}
+
+[Serializable]
+public class AreaInputActionData
+{
+    public TouchArea area;
+    public AreaInputTrigger trigger = AreaInputTrigger.LeftClick;
+    public ConstantButtonData action;
 }
 
 [Serializable]
