@@ -11,7 +11,7 @@ public class TouchAreaInputHandler : MonoBehaviour, IPointerDownHandler, IPointe
     private bool firedLong;
     private float pressStartTime;
     private int activePointerId = int.MinValue;
-    private PointerEventData.InputButton pressedButton = PointerEventData.InputButton.Left;
+    private PointerEventData.InputButton pressedButton;
 
     private void Update()
     {

@@ -509,7 +509,7 @@ public class OsawariGameController : MonoBehaviour
         bool areaChanged = !state.area.HasValue || state.area.Value != area;
         bool actionChanged = state.action != action;
 
-        if (actionChanged || areaChanged || !state.isActive || forceAuto)
+        if (forceAuto || actionChanged || areaChanged || !state.isActive)
         {
             StartSlot(targetSlot, action, area, mode, forceAuto);
             return;
@@ -549,11 +549,7 @@ public class OsawariGameController : MonoBehaviour
         state.isForcedAuto = false;
         slotStates[slot] = state;
 
-        if (forceAuto)
-        {
-            StartSlotAuto(slot, action, true);
-        }
-        else if (mode == AreaPlayMode.AutoOnly)
+        if (forceAuto || mode == AreaPlayMode.AutoOnly)
         {
             StartSlotAuto(slot, action, true);
         }
@@ -984,6 +980,7 @@ public enum TouchArea
     RightBreast,
     LeftBreast,
     Mata,
+    // Legacy alias kept for compatibility with existing inspector assignments.
     Crotch = Mata
 }
 
