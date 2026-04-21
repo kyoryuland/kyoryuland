@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Audio;
+using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
 public class OsawariGameController : MonoBehaviour
@@ -17,14 +18,15 @@ public class OsawariGameController : MonoBehaviour
     public Image manCrotchImage;
     public Image subImage;
 
-    [Header("Touch Area Buttons")]
-    public Button faceAreaButton;
-    public Button rightBreastAreaButton;
-    public Button leftBreastAreaButton;
-    public Button crotchAreaButton;
 
-    [Header("Action Buttons")]
-    public List<ConstantButtonData> constantButtons = new List<ConstantButtonData>();
+    [Header("Touch Area Input Handlers")]
+    public TouchAreaInputHandler faceAreaInputHandler;
+    public TouchAreaInputHandler rightBreastAreaInputHandler;
+    public TouchAreaInputHandler leftBreastAreaInputHandler;
+    public TouchAreaInputHandler crotchAreaInputHandler;
+
+    [Header("Area Input Actions (4 Areas x Left/Right/Long)")]
+    public List<AreaInputActionData> areaInputActions = new List<AreaInputActionData>();
 
     [Header("Controls")]
     public Button autoToggleButton;
@@ -45,7 +47,6 @@ public class OsawariGameController : MonoBehaviour
 
     [Header("Status Values")]
     public float kandoValue;
-    // Minimal scaffold for upcoming game logic; currently updated per-action in ValueTickCoroutine.
     public float excitementValue;
     public float minValue = 0f;
     public float maxValue = 100f;
@@ -63,6 +64,52 @@ public class OsawariGameController : MonoBehaviour
     public Sprite autoOffSprite;
     public Sprite autoOnSprite;
 
+    [Header("Conversation UI")]
+    public Image conversationMaleImage;
+    public Image conversationFemaleImage;
+
+    [Header("Opening Conversation")]
+    public ConversationSequence openingConversation;
+
+    [Header("Area Conversations (one-time by action+area)")]
+    public List<AreaConversationData> areaConversations = new List<AreaConversationData>();
+
+    [Header("Single-use Conversations")]
+    public List<SingleUseButtonData> singleUseButtons = new List<SingleUseButtonData>();
+
+    [Header("Next Scene")]
+    public Button nextSceneButton;
+    public NextSceneData nextSceneData;
+
+    [Header("Outfit Drag Unlocks")]
+    public float undressDragThresholdPixels = 30f;
+    public float outfitChangeDurationSeconds = 1f;
+    public AudioClip outfitChangeClip;
+    public AudioMixerGroup outfitChangeMixerGroup;
+
+    [Header("Area Input Unlocks (by Area x Trigger)")]
+    public List<AreaInputKey> initialUnlockedInputs = new List<AreaInputKey>();
+
+    [Header("Realtime Speed Debug")]
+    public float debugSpeedSliderValue;
+    public float debugSpeedMultiplier = 1f;
+    public float debugEffectiveAutoInterval;
+
+    [Header("UI Roots (hidden during Opening/Next event conversations)")]
+    public GameObject gameplayUiRoot;   // 行動ボタン、停止、背景切替、スライダー等をまとめた親
+    public GameObject menuImagesRoot;   // メニュー画像群をまとめた親（最初は見せない）
+
+    [Header("Event Conversation Advance (center click to advance)")]
+    public Button eventConversationAdvanceButton; // 画面中央に置く透明ボタン推奨
+
+    [Header("Opening First Turn Transition")]
+    public float openingFirstTurnCrossFadeSeconds = 0.25f;
+
+    [Header("Fade")]
+    public Image fadeOverlay;
+    public float fadeOutSeconds = 0.5f;
+    public float fadeInSeconds = 0.5f;
+
     private ConstantButtonData currentAction;
     private TouchArea? currentArea;
     private bool autoToggleOn;
@@ -76,6 +123,36 @@ public class OsawariGameController : MonoBehaviour
 
     private AudioSource sfxAudioSource;
     private AudioSource stoppedLoopAudioSource;
+
+    private bool isGameplayInputLocked;
+    private bool isGameplayConversationActive;
+    private bool isOutfitChangePauseActive;
+
+    private bool topDragUnlocked;
+    private bool bottomDragUnlocked;
+
+    private Coroutine gameplayConversationCoroutine;
+    private int gameplayConversationToken;
+
+    private Coroutine lockedConversationCoroutine;
+
+    private Coroutine outfitChangePauseCoroutine;
+    private int outfitChangePauseToken;
+    private readonly Dictionary<MenSlot, AutoResumeState> outfitPauseResumeStates = new Dictionary<MenSlot, AutoResumeState>();
+
+    private TouchArea? dragStartArea;
+    private Vector2 dragStartPosition;
+    private bool isDragTracking;
+
+    private readonly HashSet<AreaConversationKey> playedAreaConversations = new HashSet<AreaConversationKey>();
+    private readonly HashSet<SingleUseButtonData> usedSingleUseButtons = new HashSet<SingleUseButtonData>();
+
+    private readonly HashSet<AreaInputKey> unlockedInputs = new HashSet<AreaInputKey>();
+
+    private bool isEventConversationActive;
+    private int eventAdvanceToken;
+
+
 
     private void Awake()
     {
@@ -100,47 +177,322 @@ public class OsawariGameController : MonoBehaviour
             backgroundChangeButton.onClick.AddListener(HandleBackgroundChangeButton);
         }
 
-        if (faceAreaButton != null)
+        if (speedSlider != null)
         {
-            faceAreaButton.onClick.AddListener(() => HandleAreaClick(TouchArea.Face));
+            speedSlider.onValueChanged.AddListener(HandleSpeedSliderValueChanged);
         }
 
-        if (rightBreastAreaButton != null)
+        if (nextSceneButton != null)
         {
-            rightBreastAreaButton.onClick.AddListener(() => HandleAreaClick(TouchArea.RightBreast));
+            nextSceneButton.onClick.AddListener(HandleNextSceneButton);
         }
 
-        if (leftBreastAreaButton != null)
+        if (eventConversationAdvanceButton != null)
         {
-            leftBreastAreaButton.onClick.AddListener(() => HandleAreaClick(TouchArea.LeftBreast));
+            eventConversationAdvanceButton.onClick.AddListener(RequestEventConversationAdvance);
+            eventConversationAdvanceButton.gameObject.SetActive(false); // 最初は隠す
         }
 
-        if (crotchAreaButton != null)
+        if (fadeOverlay != null)
         {
-            crotchAreaButton.onClick.AddListener(() => HandleAreaClick(TouchArea.Crotch));
+            // シーン開始は黒から始める（Startより前＝最初のフレームから黒）
+            fadeOverlay.gameObject.SetActive(true);
+
+            Color c = fadeOverlay.color;
+            c.a = 1f;
+            fadeOverlay.color = c;
+
+            // クリックをブロックしたいならONのままでOK（FadeIn終了後にOFFにする）
+            fadeOverlay.raycastTarget = true;
         }
 
-        foreach (var action in constantButtons)
+        foreach (var buttonData in singleUseButtons)
         {
-            if (action?.button == null)
+            if (buttonData?.button == null)
             {
                 continue;
             }
 
-            ConstantButtonData capturedAction = action;
-            capturedAction.button.onClick.AddListener(() => HandleConstantActionClick(capturedAction));
+            SingleUseButtonData capturedData = buttonData;
+            capturedData.button.onClick.AddListener(() => HandleSingleUseButton(capturedData));
         }
 
         InitializeSlotStates();
         HideAllMenSlotImages();
+        HideConversationImages();
         UpdateAutoToggleIndicator();
         ApplyBackground();
+        // 起動直後はUIを隠しておく（Openingが無い場合は後で戻す）
+        SetEventUiVisible(false);
+        RefreshSpeedDebugInfo();
+
+
+        unlockedInputs.Clear();
+        if (initialUnlockedInputs != null)
+        {
+            foreach (var key in initialUnlockedInputs)
+            {
+                unlockedInputs.Add(key);
+            }
+        }
+
+        UpdateInputInteractableState();
     }
 
-    // Inspector helper: assign this from each touch-area button if you prefer explicit event wiring.
+    private void Start()
+    {
+        // 最初はUI非表示
+        SetEventUiVisible(false);
+
+        StartCoroutine(SceneStartRoutine());
+    }
+
+    private IEnumerator SceneStartRoutine()
+    {
+        if (fadeOverlay != null)
+        {
+            yield return FadeIn(fadeInSeconds);
+        }
+
+        // Openingがあるなら、Opening側でBeginEventConversation→EndEventConversationが走る
+        TryStartOpeningConversation();
+
+        // Openingが「無い」場合は、ここでUIを戻す
+        if (openingConversation == null || !openingConversation.HasTurns)
+        {
+            SetEventUiVisible(true);
+        }
+    }
+
+    private void RequestEventConversationAdvance()
+    {
+        if (!isEventConversationActive)
+        {
+            return;
+        }
+
+        eventAdvanceToken++;
+    }
+
+    private void BeginEventConversation()
+    {
+        isEventConversationActive = true;
+        eventAdvanceToken = 0;
+
+        SetEventUiVisible(false); // ボタン類・最初のメニューも全部隠す
+
+        if (eventConversationAdvanceButton != null)
+        {
+            eventConversationAdvanceButton.gameObject.SetActive(true); // センタークリックだけON
+        }
+    }
+
+    private void EndEventConversation()
+    {
+        isEventConversationActive = false;
+
+        if (eventConversationAdvanceButton != null)
+        {
+            eventConversationAdvanceButton.gameObject.SetActive(false);
+        }
+
+        SetEventUiVisible(true); // イベント終了後にUIを戻す
+    }
+
+    private IEnumerator WaitTurnDurationOrEventAdvance(float seconds)
+    {
+        float endTime = Time.unscaledTime + Mathf.Max(0.01f, seconds);
+        int startToken = eventAdvanceToken;
+
+        while (Time.unscaledTime < endTime)
+        {
+            // イベント会話中だけ、クリックで待ちをスキップ
+            if (isEventConversationActive && eventAdvanceToken != startToken)
+            {
+                yield break;
+            }
+
+            yield return null;
+        }
+    }
+
+
+
+    private IEnumerator FadeOut(float seconds)
+    {
+        if (fadeOverlay == null)
+        {
+            yield break;
+        }
+
+        fadeOverlay.gameObject.SetActive(true);
+
+        Color c = fadeOverlay.color;
+        c.a = 0f;
+        fadeOverlay.color = c;
+
+        float t = 0f;
+        seconds = Mathf.Max(0.01f, seconds);
+
+        while (t < seconds)
+        {
+            t += Time.unscaledDeltaTime;
+            c.a = Mathf.Clamp01(t / seconds);
+            fadeOverlay.color = c;
+            yield return null;
+        }
+
+        c.a = 1f;
+        fadeOverlay.color = c;
+    }
+
+    private IEnumerator FadeIn(float seconds)
+    {
+        if (fadeOverlay == null)
+        {
+            yield break;
+        }
+
+        fadeOverlay.gameObject.SetActive(true);
+
+        Color c = fadeOverlay.color;
+        c.a = 1f;                // 最初は真っ黒（不透明）
+        fadeOverlay.color = c;
+
+        float t = 0f;
+        seconds = Mathf.Max(0.01f, seconds);
+
+        while (t < seconds)
+        {
+            t += Time.unscaledDeltaTime;
+            c.a = 1f - Mathf.Clamp01(t / seconds);   // 1 -> 0
+            fadeOverlay.color = c;
+            yield return null;
+        }
+
+        c.a = 0f;
+        fadeOverlay.color = c;
+        fadeOverlay.raycastTarget = false;   // クリックブロック解除
+        // 透明になったらオブジェクトごと無効化（Raycastも止めたい場合）
+        fadeOverlay.gameObject.SetActive(false);
+    }
+
+    private IEnumerator FadeInSceneVisuals(float seconds)
+    {
+        seconds = Mathf.Max(0.01f, seconds);
+
+        Image[] targets =
+        {
+        backgroundImage,
+        bodyImage,
+        faceImage,
+        subImage,
+        manMouthImage,
+        manRightHandImage,
+        manLeftHandImage,
+        manCrotchImage
+    };
+
+        // まずα=0
+        for (int i = 0; i < targets.Length; i++)
+        {
+            if (targets[i] == null) continue;
+            Color c = targets[i].color;
+            c.a = 0f;
+            targets[i].color = c;
+        }
+
+        float t = 0f;
+        while (t < seconds)
+        {
+            t += Time.unscaledDeltaTime;
+            float a = Mathf.Clamp01(t / seconds);
+
+            for (int i = 0; i < targets.Length; i++)
+            {
+                if (targets[i] == null) continue;
+                Color c = targets[i].color;
+                c.a = a;
+                targets[i].color = c;
+            }
+
+            yield return null;
+        }
+    }
+
+    private IEnumerator CrossFadeOpeningFirstTurn(float seconds)
+    {
+        seconds = Mathf.Max(0.01f, seconds);
+
+        // 対象（存在するものだけ）
+        Image[] targets = new Image[]
+        {
+        backgroundImage,
+        bodyImage,
+        faceImage,
+        subImage,
+        manMouthImage,
+        manRightHandImage,
+        manLeftHandImage,
+        manCrotchImage,
+        conversationMaleImage,
+        conversationFemaleImage,
+        };
+
+        // いったん全て α=0 にする（表示は維持したいので sprite は触らない）
+        for (int i = 0; i < targets.Length; i++)
+        {
+            if (targets[i] == null) continue;
+            var c = targets[i].color;
+            c.a = 0f;
+            targets[i].color = c;
+        }
+
+        float t = 0f;
+        while (t < seconds)
+        {
+            t += Time.unscaledDeltaTime;
+            float a = Mathf.Clamp01(t / seconds);
+
+            for (int i = 0; i < targets.Length; i++)
+            {
+                if (targets[i] == null) continue;
+                var c = targets[i].color;
+                c.a = a;
+                targets[i].color = c;
+            }
+
+            yield return null;
+        }
+    }
+    private void SetEventUiVisible(bool visible)
+    {
+        if (gameplayUiRoot != null)
+        {
+            gameplayUiRoot.SetActive(visible);
+        }
+
+        if (menuImagesRoot != null)
+        {
+            menuImagesRoot.SetActive(visible);
+        }
+    }
+
+    // Legacy helper keeps existing references working; left click behavior is used.
     public void HandleAreaClick(TouchArea area)
     {
-        if (currentAction == null)
+        HandleAreaInput(area, AreaInputTrigger.LeftClick);
+    }
+
+    public void HandleAreaInput(TouchArea area, AreaInputTrigger trigger)
+    {
+        if (IsGameplayInputBlocked())
+        {
+            return;
+        }
+
+        ConstantButtonData action = ResolveAreaInputAction(area, trigger);
+        if (action == null)
         {
             return;
         }
@@ -150,15 +502,25 @@ public class OsawariGameController : MonoBehaviour
             ExitStoppedState();
         }
 
+        currentAction = action;
         currentArea = area;
-        StartOrUpdateSlot(currentAction, area);
+
+        AreaPlayMode? forcedMode = trigger == AreaInputTrigger.LongPress ? AreaPlayMode.AutoOnly : (AreaPlayMode?)null;
+        StartOrUpdateSlot(action, area, forcedMode);
         ApplyPose();
         StartValueTickerIfNeeded();
         StartRandomOnomatopoeiaIfNeeded();
+        TryPlayAreaConversation(action, area);
+        RefreshSpeedDebugInfo();
     }
 
     public void HandleConstantActionClick(ConstantButtonData action)
     {
+        if (IsGameplayInputBlocked())
+        {
+            return;
+        }
+
         if (action == null)
         {
             return;
@@ -183,11 +545,17 @@ public class OsawariGameController : MonoBehaviour
         {
             StartValueTickerIfNeeded();
             StartRandomOnomatopoeiaIfNeeded();
+            RefreshSpeedDebugInfo();
         }
     }
 
     public void HandleAutoToggleButton()
     {
+        if (IsGameplayInputBlocked())
+        {
+            return;
+        }
+
         autoToggleOn = !autoToggleOn;
         UpdateAutoToggleIndicator();
 
@@ -209,11 +577,23 @@ public class OsawariGameController : MonoBehaviour
 
     public void HandleStopActionButton()
     {
+        if (isGameplayInputLocked)
+        {
+            return;
+        }
+
+        StopGameplayConversation();
+        CancelOutfitChangePause(true);
         EnterStoppedState();
     }
 
     public void HandleBackgroundChangeButton()
     {
+        if (IsGameplayInputBlocked())
+        {
+            return;
+        }
+
         if (backgrounds == null || backgrounds.Count == 0)
         {
             Debug.LogWarning("Background change requested but no backgrounds are assigned.");
@@ -224,10 +604,125 @@ public class OsawariGameController : MonoBehaviour
         ApplyBackground();
     }
 
+    public void HandleNextSceneButton()
+    {
+        if (IsGameplayInputBlocked())
+        {
+            return;
+        }
+
+        if (lockedConversationCoroutine != null)
+        {
+            return;
+        }
+
+        lockedConversationCoroutine = StartCoroutine(NextSceneFlowCoroutine());
+    }
+
+    public void HandleSingleUseButton(SingleUseButtonData buttonData)
+    {
+        if (IsGameplayInputBlocked())
+        {
+            return;
+        }
+
+        if (buttonData == null || buttonData.button == null || usedSingleUseButtons.Contains(buttonData))
+        {
+            return;
+        }
+
+        if (isStopped)
+        {
+            ExitStoppedState();
+        }
+
+        StartGameplayConversation(buttonData.conversation, () =>
+        {
+            usedSingleUseButtons.Add(buttonData);
+
+            if (buttonData.disableAfterUse && buttonData.button != null)
+            {
+                buttonData.button.interactable = false;
+                if (buttonData.hideAfterUse)
+                {
+                    buttonData.button.gameObject.SetActive(false);
+                }
+            }
+
+            if (buttonData.unlockOnComplete)
+            {
+                ApplyUnlock(buttonData.unlockType);
+            }
+
+            // === ここから追記：行動解禁 ===
+            if (buttonData.unlockInputsOnComplete != null)
+            {
+                foreach (var key in buttonData.unlockInputsOnComplete)
+                {
+                    unlockedInputs.Add(key);
+                }
+            }
+
+            // === ここから追記：メニュー画像表示（出しっぱなし）===
+            if (buttonData.menuImagesToShowOnComplete != null)
+            {
+                foreach (var img in buttonData.menuImagesToShowOnComplete)
+                {
+                    if (img != null)
+                    {
+                        img.gameObject.SetActive(true);
+                    }
+                }
+            }
+        });
+    }
+
+    public void NotifyPointerDown(TouchArea area, Vector2 screenPosition)
+    {
+        if (IsGameplayInputBlocked())
+        {
+            return;
+        }
+
+        dragStartArea = area;
+        dragStartPosition = screenPosition;
+        isDragTracking = true;
+    }
+
+    public void NotifyPointerDrag(Vector2 screenPosition)
+    {
+        if (!isDragTracking || !dragStartArea.HasValue || IsGameplayInputBlocked())
+        {
+            return;
+        }
+
+        TouchArea area = dragStartArea.Value;
+        if (!CanUndressFromArea(area))
+        {
+            return;
+        }
+
+        float dragDistance = Vector2.Distance(dragStartPosition, screenPosition);
+        if (dragDistance < undressDragThresholdPixels)
+        {
+            return;
+        }
+
+        TryUndress(area);
+        dragStartArea = null;
+        isDragTracking = false;
+    }
+
+    public void NotifyPointerUp()
+    {
+        dragStartArea = null;
+        isDragTracking = false;
+    }
+
     // Optional hook for dialogue/event systems.
     public void SetBackground(Sprite sprite)
     {
-        if (backgroundImage == null)
+        if (backgroundImage == null || sprite == null)
         {
             return;
         }
@@ -235,9 +730,555 @@ public class OsawariGameController : MonoBehaviour
         backgroundImage.sprite = sprite;
     }
 
+    private void ApplyTurnSceneOverrides(ConversationTurn turn)
+    {
+        if (turn == null)
+        {
+            return;
+        }
+
+        // 背景
+        if (turn.backgroundOverride != null && backgroundImage != null)
+        {
+            backgroundImage.sprite = turn.backgroundOverride;
+        }
+
+        // 女側（Body/Face/Sub）
+        if (turn.bodyOverride != null && bodyImage != null)
+        {
+            bodyImage.sprite = turn.bodyOverride;
+            bodyImage.gameObject.SetActive(true);
+        }
+
+        if (turn.faceOverride != null && faceImage != null)
+        {
+            faceImage.sprite = turn.faceOverride;
+            faceImage.gameObject.SetActive(true);
+        }
+
+        if (turn.subOverride != null && subImage != null)
+        {
+            subImage.sprite = turn.subOverride;
+            subImage.gameObject.SetActive(true);
+        }
+
+        // 男側（4スロット）
+        if (turn.manMouthOverride != null)
+        {
+            SetSlotImageSprite(MenSlot.Mouth, turn.manMouthOverride);
+        }
+
+        if (turn.manRightHandOverride != null)
+        {
+            SetSlotImageSprite(MenSlot.RightHand, turn.manRightHandOverride);
+        }
+
+        if (turn.manLeftHandOverride != null)
+        {
+            SetSlotImageSprite(MenSlot.LeftHand, turn.manLeftHandOverride);
+        }
+
+        if (turn.manCrotchOverride != null)
+        {
+            SetSlotImageSprite(MenSlot.Crotch, turn.manCrotchOverride);
+        }
+    }
+
+    public bool TryUndressFromDrag(TouchArea area, Vector2 pressStartPosition, Vector2 currentPosition)
+    {
+        if (IsGameplayInputBlocked())
+        {
+            return false;
+        }
+
+        if (!isDragTracking || !dragStartArea.HasValue)
+        {
+            return false;
+        }
+
+        if (!CanUndressFromArea(area))
+        {
+            return false;
+        }
+
+        float dragDistance = Vector2.Distance(pressStartPosition, currentPosition);
+        if (dragDistance < undressDragThresholdPixels)
+        {
+            return false;
+        }
+
+        bool changed = false;
+
+        // 上：胸エリア
+        if (topDragUnlocked && (area == TouchArea.LeftBreast || area == TouchArea.RightBreast))
+        {
+            changed = TryAdvanceTopOutfit();
+        }
+        // 下：股エリア
+        else if (bottomDragUnlocked && area == TouchArea.Crotch)
+        {
+            changed = TryAdvanceBottomOutfit();
+        }
+
+        if (!changed)
+        {
+            return false;
+        }
+
+        // 脱衣成功時の既存演出
+        ApplyPose();
+        PlayOneShot(outfitChangeClip, outfitChangeMixerGroup);
+        BeginOutfitChangePause();
+
+        // ドラッグ状態も終了扱いにしておく（連続発火防止）
+        dragStartArea = null;
+        isDragTracking = false;
+
+        return true;
+    }
+
+    private bool IsGameplayInputBlocked()
+    {
+        return isGameplayInputLocked || isGameplayConversationActive || isOutfitChangePauseActive;
+    }
+
+    private void TryStartOpeningConversation()
+    {
+        if (openingConversation == null || !openingConversation.HasTurns)
+        {
+            return;
+        }
+
+        if (lockedConversationCoroutine != null)
+        {
+            StopCoroutine(lockedConversationCoroutine);
+        }
+
+        lockedConversationCoroutine = StartCoroutine(OpeningConversationCoroutine());
+    }
+
+    private IEnumerator OpeningConversationCoroutine()
+    {
+        BeginEventConversation();
+        SetGameplayInputLock(true);
+
+        yield return PlayConversationSequence(openingConversation);
+
+        SetGameplayInputLock(false);
+        EndEventConversation();
+
+        lockedConversationCoroutine = null;
+    }
+
+    private IEnumerator NextSceneFlowCoroutine()
+    {
+        // ここに来た時点で「次へ」が押されているので、まずUIと操作を止める
+        BeginEventConversation();
+        SetGameplayInputLock(true);
+
+        // Nextイベント会話（あれば再生 / センタークリックで早送り可）
+        if (nextSceneData != null && nextSceneData.conversation != null && nextSceneData.conversation.HasTurns)
+        {
+            yield return PlayConversationSequence(nextSceneData.conversation);
+        }
+
+        // 会話が終わったらUIは戻さず、そのまま暗転して遷移
+        string sceneName = nextSceneData != null ? nextSceneData.sceneName : null;
+        if (!string.IsNullOrWhiteSpace(sceneName))
+        {
+            yield return FadeOut(fadeOutSeconds);
+            SceneManager.LoadScene(sceneName);
+            yield break;
+        }
+
+        // sceneName が未設定なら「遷移できない」ので、仕方なくUIを戻す
+        SetGameplayInputLock(false);
+        EndEventConversation();
+        lockedConversationCoroutine = null;
+    }
+
+
+
+    private void TryPlayAreaConversation(ConstantButtonData action, TouchArea area)
+    {
+        if (action == null || areaConversations == null || areaConversations.Count == 0)
+        {
+            return;
+        }
+
+        AreaConversationData data = null;
+        for (int i = 0; i < areaConversations.Count; i++)
+        {
+            AreaConversationData candidate = areaConversations[i];
+            if (candidate == null)
+            {
+                continue;
+            }
+
+            if (candidate.action == action && candidate.area == area)
+            {
+                data = candidate;
+                break;
+            }
+        }
+
+        if (data == null || data.conversation == null || !data.conversation.HasTurns)
+        {
+            return;
+        }
+
+        AreaConversationKey key = new AreaConversationKey(action, area);
+        if (!playedAreaConversations.Add(key))
+        {
+            return;
+        }
+
+        StartGameplayConversation(data.conversation, null);
+    }
+
+    private void StartGameplayConversation(ConversationSequence conversation, Action onComplete)
+    {
+        StopGameplayConversation();
+
+        if (conversation == null || !conversation.HasTurns)
+        {
+            onComplete?.Invoke();
+            return;
+        }
+
+        isGameplayConversationActive = true;
+        UpdateInputInteractableState();
+
+        gameplayConversationToken++;
+        int token = gameplayConversationToken;
+        gameplayConversationCoroutine = StartCoroutine(GameplayConversationCoroutine(conversation, onComplete, token));
+    }
+
+    private IEnumerator GameplayConversationCoroutine(ConversationSequence conversation, Action onComplete, int token)
+    {
+        yield return PlayConversationSequence(conversation, () => token != gameplayConversationToken);
+
+        if (token != gameplayConversationToken)
+        {
+            yield break;
+        }
+
+        gameplayConversationCoroutine = null;
+        isGameplayConversationActive = false;
+        UpdateInputInteractableState();
+        onComplete?.Invoke();
+    }
+
+    private void StopGameplayConversation()
+    {
+        if (!isGameplayConversationActive && gameplayConversationCoroutine == null)
+        {
+            HideConversationImages();
+            return;
+        }
+
+        gameplayConversationToken++;
+
+        if (gameplayConversationCoroutine != null)
+        {
+            StopCoroutine(gameplayConversationCoroutine);
+            gameplayConversationCoroutine = null;
+        }
+
+        isGameplayConversationActive = false;
+        HideConversationImages();
+        UpdateInputInteractableState();
+    }
+
+    private IEnumerator PlayConversationSequence(ConversationSequence sequence, Func<bool> shouldCancel = null)
+    {
+        HideConversationImages();
+
+        if (sequence == null || sequence.turns == null)
+        {
+            yield break;
+        }
+
+        for (int i = 0; i < sequence.turns.Count; i++)
+        {
+            if (shouldCancel != null && shouldCancel())
+            {
+                HideConversationImages();
+                yield break;
+            }
+
+            ConversationTurn turn = sequence.turns[i];
+            if (turn == null)
+            {
+                continue;
+            }
+
+            // ★イベント会話の最初だけ：下地→ターン0適用→見た目レイヤーだけフェードイン
+            if (isEventConversationActive && i == 0)
+            {
+                // 1) 下地（任意）
+                if (sequence.baseVisualTurn != null)
+                {
+                    ApplyTurnSceneOverrides(sequence.baseVisualTurn);
+                }
+
+                // 2) ターン0の見た目を適用
+                ApplyTurnSceneOverrides(turn);
+
+                // 3) 見た目レイヤーだけフェードイン（会話立ち絵はフェードさせない）
+                if (sequence.baseToFirstTurnFadeSeconds > 0f)
+                {
+                    yield return FadeInSceneVisuals(sequence.baseToFirstTurnFadeSeconds);
+                }
+            }
+            else
+            {
+                // 通常のイベントターン：そのまま上書き
+                if (isEventConversationActive)
+                {
+                    ApplyTurnSceneOverrides(turn);
+                }
+            }
+
+            ShowConversationTurn(turn);
+            PlayOneShot(turn.audioClip, turn.audioMixerGroup);
+
+
+            float duration = Mathf.Max(0.01f, turn.durationSeconds);
+
+            // ★関数名を「定義してある方」に合わせる
+            yield return WaitTurnDurationOrEventAdvance(duration);
+
+        }
+
+        HideConversationImages();
+    }
+
+    private void ShowConversationTurn(ConversationTurn turn)
+    {
+        // イベント会話中だけ、男女を個別指定できる方を優先
+        bool useOverrides = isEventConversationActive &&
+                            (turn.maleConversationSprite != null || turn.femaleConversationSprite != null);
+
+        Sprite maleSprite = null;
+        Sprite femaleSprite = null;
+
+        if (useOverrides)
+        {
+            maleSprite = turn.maleConversationSprite;
+            femaleSprite = turn.femaleConversationSprite;
+        }
+        else
+        {
+            // 従来互換：speaker + sprite でどちらか片側に出す
+            bool showMale = turn.speaker == ConversationSpeaker.Male;
+            maleSprite = showMale ? turn.sprite : null;
+            femaleSprite = showMale ? null : turn.sprite;
+        }
+
+        if (conversationMaleImage != null)
+        {
+            conversationMaleImage.sprite = maleSprite;
+            conversationMaleImage.gameObject.SetActive(maleSprite != null);
+        }
+
+        if (conversationFemaleImage != null)
+        {
+            conversationFemaleImage.sprite = femaleSprite;
+            conversationFemaleImage.gameObject.SetActive(femaleSprite != null);
+        }
+    }
+
+    private void HideConversationImages()
+    {
+        if (conversationMaleImage != null)
+        {
+            conversationMaleImage.sprite = null;
+            conversationMaleImage.gameObject.SetActive(false);
+        }
+
+        if (conversationFemaleImage != null)
+        {
+            conversationFemaleImage.sprite = null;
+            conversationFemaleImage.gameObject.SetActive(false);
+        }
+    }
+
+    private void ApplyUnlock(UnlockType unlockType)
+    {
+        switch (unlockType)
+        {
+            case UnlockType.TopDrag:
+                topDragUnlocked = true;
+                break;
+            case UnlockType.BottomDrag:
+                bottomDragUnlocked = true;
+                break;
+            case UnlockType.Both:
+                topDragUnlocked = true;
+                bottomDragUnlocked = true;
+                break;
+        }
+    }
+
+    private bool CanUndressFromArea(TouchArea area)
+    {
+        if (topDragUnlocked && (area == TouchArea.LeftBreast || area == TouchArea.RightBreast))
+        {
+            return true;
+        }
+
+        if (bottomDragUnlocked && area == TouchArea.Crotch)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private void TryUndress(TouchArea area)
+    {
+        bool changed = false;
+
+        if (topDragUnlocked && (area == TouchArea.LeftBreast || area == TouchArea.RightBreast))
+        {
+            changed = TryAdvanceTopOutfit();
+        }
+        else if (bottomDragUnlocked && area == TouchArea.Crotch)
+        {
+            changed = TryAdvanceBottomOutfit();
+        }
+
+        if (!changed)
+        {
+            return;
+        }
+
+        ApplyPose();
+        PlayOneShot(outfitChangeClip, outfitChangeMixerGroup);
+        BeginOutfitChangePause();
+    }
+
+    private bool TryAdvanceTopOutfit()
+    {
+        switch (currentTopOutfit)
+        {
+            case TopOutfit.Sweater:
+                currentTopOutfit = TopOutfit.Bra;
+                return true;
+            case TopOutfit.Bra:
+                currentTopOutfit = TopOutfit.Topless;
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private bool TryAdvanceBottomOutfit()
+    {
+        switch (currentBottomOutfit)
+        {
+            case BottomOutfit.Skirt:
+                currentBottomOutfit = BottomOutfit.Panties;
+                return true;
+            case BottomOutfit.Panties:
+                currentBottomOutfit = BottomOutfit.Nude;
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private void BeginOutfitChangePause()
+    {
+        CancelOutfitChangePause(true);
+
+        outfitPauseResumeStates.Clear();
+        foreach (var pair in slotStates)
+        {
+            SlotRuntimeState state = pair.Value;
+            outfitPauseResumeStates[pair.Key] = new AutoResumeState
+            {
+                shouldResume = state.isAutoRunning,
+                forced = state.isForcedAuto
+            };
+
+            if (state.isAutoRunning)
+            {
+                StopSlotAuto(pair.Key, false);
+            }
+        }
+
+        HideAllMenSlotImages();
+
+        isOutfitChangePauseActive = true;
+        UpdateInputInteractableState();
+
+        outfitChangePauseToken++;
+        int token = outfitChangePauseToken;
+        outfitChangePauseCoroutine = StartCoroutine(OutfitChangePauseCoroutine(token));
+    }
+
+    private IEnumerator OutfitChangePauseCoroutine(int token)
+    {
+        float wait = Mathf.Max(0f, outfitChangeDurationSeconds);
+        if (wait > 0f)
+        {
+            yield return new WaitForSeconds(wait);
+        }
+
+        if (token != outfitChangePauseToken)
+        {
+            yield break;
+        }
+
+        outfitChangePauseCoroutine = null;
+        isOutfitChangePauseActive = false;
+
+        foreach (var pair in outfitPauseResumeStates)
+        {
+            if (!pair.Value.shouldResume)
+            {
+                continue;
+            }
+
+            MenSlot slot = pair.Key;
+            SlotRuntimeState state = slotStates[slot];
+            if (!state.isActive || state.action == null || !state.area.HasValue)
+            {
+                continue;
+            }
+
+            StartSlotAuto(slot, state.action, pair.Value.forced);
+        }
+
+        outfitPauseResumeStates.Clear();
+        ApplyPose();
+        UpdateInputInteractableState();
+    }
+
+    private void CancelOutfitChangePause(bool preventResume)
+    {
+        if (preventResume)
+        {
+            outfitChangePauseToken++;
+        }
+
+        if (outfitChangePauseCoroutine != null)
+        {
+            StopCoroutine(outfitChangePauseCoroutine);
+            outfitChangePauseCoroutine = null;
+        }
+
+        outfitPauseResumeStates.Clear();
+        isOutfitChangePauseActive = false;
+        UpdateInputInteractableState();
+    }
+
     private void EnterStoppedState()
     {
         isStopped = true;
+        NotifyPointerUp();
         StopAllSlots();
         StopValueTicker();
         StopRandomOnomatopoeia();
@@ -315,7 +1356,11 @@ public class OsawariGameController : MonoBehaviour
         ApplyFrameToImage(bodyImage, SelectFrame(pose.bodyFrames, displayFrameIndex));
         ApplyFrameToImage(subImage, SelectFrame(pose.subFrames, displayFrameIndex));
         ApplyFrameToImage(faceImage, SelectFaceByKando(pose));
-        ApplyAllSlotMenImages();
+
+        if (!isOutfitChangePauseActive)
+        {
+            ApplyAllSlotMenImages();
+        }
     }
 
     private void ApplyBackground()
@@ -326,7 +1371,15 @@ public class OsawariGameController : MonoBehaviour
         }
 
         backgroundIndex = Mathf.Clamp(backgroundIndex, 0, backgrounds.Count - 1);
-        backgroundImage.sprite = backgrounds[backgroundIndex];
+
+        Sprite candidate = backgrounds[backgroundIndex];
+        if (candidate == null)
+        {
+            Debug.LogWarning($"Background sprite is null at index {backgroundIndex}. Skipping.");
+            return;
+        }
+
+        backgroundImage.sprite = candidate;
     }
 
     private void ApplyFrameToImage(Image image, Sprite sprite)
@@ -497,7 +1550,40 @@ public class OsawariGameController : MonoBehaviour
         }
     }
 
-    private void StartOrUpdateSlot(ConstantButtonData action, TouchArea area)
+    private ConstantButtonData ResolveAreaInputAction(TouchArea area, AreaInputTrigger trigger)
+    {
+        if (areaInputActions == null)
+        {
+            return null;
+        }
+
+        for (int i = 0; i < areaInputActions.Count; i++)
+        {
+            AreaInputActionData candidate = areaInputActions[i];
+            if (candidate == null)
+            {
+                continue;
+            }
+
+            if (candidate.area == area && candidate.trigger == trigger)
+            {
+                if (candidate.requiresUnlock)
+                {
+                    AreaInputKey key = candidate.requiredUnlock;
+                    if (!unlockedInputs.Contains(key))
+                    {
+                        return null; // 静かに無視
+                    }
+                }
+
+                return candidate.action;
+            }
+        }
+
+        return null;
+    }
+
+    private void StartOrUpdateSlot(ConstantButtonData action, TouchArea area, AreaPlayMode? forcedMode = null)
     {
         if (action == null)
         {
@@ -519,7 +1605,7 @@ public class OsawariGameController : MonoBehaviour
 
         MenSlot targetSlot = action.targetMenSlot;
         SlotRuntimeState state = slotStates[targetSlot];
-        AreaPlayMode mode = GetAreaPlayMode(action, area);
+        AreaPlayMode mode = forcedMode ?? GetAreaPlayMode(action, area);
         bool areaChanged = !state.area.HasValue || state.area.Value != area;
         bool actionChanged = state.action != action;
 
@@ -908,6 +1994,98 @@ public class OsawariGameController : MonoBehaviour
         stoppedLoopAudioSource.clip = null;
     }
 
+    private void HandleSpeedSliderValueChanged(float _)
+    {
+        if (isGameplayInputLocked)
+        {
+            if (speedSlider != null)
+            {
+                speedSlider.SetValueWithoutNotify(debugSpeedSliderValue);
+            }
+
+            return;
+        }
+
+        RefreshSpeedDebugInfo();
+    }
+
+    private void RefreshSpeedDebugInfo()
+    {
+        float sliderValue = speedSlider != null ? speedSlider.value : 1f;
+        debugSpeedSliderValue = sliderValue;
+        debugSpeedMultiplier = Mathf.Max(0.01f, sliderValue);
+
+        float autoBaseInterval = fallbackAutoBaseInterval;
+        if (currentAction != null && currentAction.autoBaseInterval > 0f)
+        {
+            autoBaseInterval = currentAction.autoBaseInterval;
+        }
+
+        debugEffectiveAutoInterval = autoBaseInterval / debugSpeedMultiplier;
+    }
+
+    private void SetGameplayInputLock(bool isLocked)
+    {
+        isGameplayInputLocked = isLocked;
+        UpdateInputInteractableState();
+    }
+
+
+
+    private void UpdateInputInteractableState()
+    {
+        bool gameplayEnabled = !IsGameplayInputBlocked();
+
+        SetAreaInputEnabled(faceAreaInputHandler, gameplayEnabled);
+        SetAreaInputEnabled(rightBreastAreaInputHandler, gameplayEnabled);
+        SetAreaInputEnabled(leftBreastAreaInputHandler, gameplayEnabled);
+        SetAreaInputEnabled(crotchAreaInputHandler, gameplayEnabled);
+
+        if (autoToggleButton != null)
+        {
+            autoToggleButton.interactable = gameplayEnabled;
+        }
+
+        if (backgroundChangeButton != null)
+        {
+            backgroundChangeButton.interactable = gameplayEnabled;
+        }
+
+        if (speedSlider != null)
+        {
+            speedSlider.interactable = gameplayEnabled;
+        }
+
+        if (nextSceneButton != null)
+        {
+            nextSceneButton.interactable = gameplayEnabled;
+        }
+
+        foreach (var singleUse in singleUseButtons)
+        {
+            if (singleUse?.button == null)
+            {
+                continue;
+            }
+
+            bool isUsed = usedSingleUseButtons.Contains(singleUse);
+            singleUse.button.interactable = gameplayEnabled && !isUsed;
+        }
+
+        if (stopActionButton != null)
+        {
+            stopActionButton.interactable = !isGameplayInputLocked;
+        }
+    }
+
+    private static void SetAreaInputEnabled(TouchAreaInputHandler handler, bool enabled)
+    {
+        if (handler != null)
+        {
+            handler.SetInputEnabled(enabled);
+        }
+    }
+
     private class SlotRuntimeState
     {
         public ConstantButtonData action;
@@ -917,6 +2095,45 @@ public class OsawariGameController : MonoBehaviour
         public bool isAutoRunning;
         public bool isForcedAuto;
         public Coroutine autoCoroutine;
+    }
+
+    private struct AutoResumeState
+    {
+        public bool shouldResume;
+        public bool forced;
+    }
+
+    private readonly struct AreaConversationKey : IEquatable<AreaConversationKey>
+    {
+        public readonly ConstantButtonData action;
+        public readonly TouchArea area;
+
+        public AreaConversationKey(ConstantButtonData action, TouchArea area)
+        {
+            this.action = action;
+            this.area = area;
+        }
+
+        public bool Equals(AreaConversationKey other)
+        {
+            return action == other.action && area == other.area;
+        }
+
+        public override bool Equals(object obj)
+        {
+            return obj is AreaConversationKey other && Equals(other);
+        }
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                int hash = 17;
+                hash = (hash * 31) + (action != null ? action.GetHashCode() : 0);
+                hash = (hash * 31) + (int)area;
+                return hash;
+            }
+        }
     }
 
     private void UpdateAutoToggleIndicator()
@@ -937,7 +2154,36 @@ public class OsawariGameController : MonoBehaviour
             autoToggleIndicator.sprite = autoOffSprite;
         }
     }
+
+    private static AreaInputKey ToInputKey(TouchArea area, AreaInputTrigger trigger)
+    {
+        switch (area)
+        {
+            case TouchArea.Face:
+                return trigger == AreaInputTrigger.RightClick ? AreaInputKey.Face_Right
+                     : trigger == AreaInputTrigger.LongPress ? AreaInputKey.Face_Long
+                     : AreaInputKey.Face_Left;
+
+            case TouchArea.RightBreast:
+                return trigger == AreaInputTrigger.RightClick ? AreaInputKey.RightBreast_Right
+                     : trigger == AreaInputTrigger.LongPress ? AreaInputKey.RightBreast_Long
+                     : AreaInputKey.RightBreast_Left;
+
+            case TouchArea.LeftBreast:
+                return trigger == AreaInputTrigger.RightClick ? AreaInputKey.LeftBreast_Right
+                     : trigger == AreaInputTrigger.LongPress ? AreaInputKey.LeftBreast_Long
+                     : AreaInputKey.LeftBreast_Left;
+
+            case TouchArea.Crotch:
+            default:
+                return trigger == AreaInputTrigger.RightClick ? AreaInputKey.Crotch_Right
+                     : trigger == AreaInputTrigger.LongPress ? AreaInputKey.Crotch_Long
+                     : AreaInputKey.Crotch_Left;
+        }
+    }
 }
+
+
 
 public enum TouchArea
 {
@@ -974,6 +2220,46 @@ public enum MenSlot
     RightHand,
     LeftHand,
     Crotch
+}
+
+public enum AreaInputTrigger
+{
+    LeftClick,
+    RightClick,
+    LongPress
+}
+
+public enum ConversationSpeaker
+{
+    Male,
+    Female
+}
+
+public enum UnlockType
+{
+    None,
+    TopDrag,
+    BottomDrag,
+    Both
+}
+
+public enum AreaInputKey
+{
+    Face_Left,
+    Face_Right,
+    Face_Long,
+
+    RightBreast_Left,
+    RightBreast_Right,
+    RightBreast_Long,
+
+    LeftBreast_Left,
+    LeftBreast_Right,
+    LeftBreast_Long,
+
+    Crotch_Left,
+    Crotch_Right,
+    Crotch_Long
 }
 
 [Serializable]
@@ -1039,7 +2325,6 @@ public class StoppedVisualSet
 public class ConstantButtonData
 {
     public string actionName;
-    public Button button;
     public MenSlot targetMenSlot = MenSlot.Mouth;
     public bool onlyExclusive;
 
@@ -1067,6 +2352,90 @@ public class ConstantButtonData
     [Header("Optional Random Onomatopoeia")]
     public float randomSpriteInterval = 0.6f;
     public List<RandomSpriteChannel> randomChannels = new List<RandomSpriteChannel>();
+}
+
+[Serializable]
+public class AreaInputActionData
+{
+    public TouchArea area;
+    public AreaInputTrigger trigger = AreaInputTrigger.LeftClick;
+    public ConstantButtonData action;
+
+    [Header("Unlock")]
+    public bool requiresUnlock;
+    public AreaInputKey requiredUnlock;
+}
+
+[Serializable]
+public class ConversationTurn
+{
+    public ConversationSpeaker speaker;
+    public Sprite sprite;
+    public float durationSeconds = 1f;
+    public AudioClip audioClip;
+    public AudioMixerGroup audioMixerGroup;
+
+    [Header("Conversation UI Overrides (optional)")]
+    public Sprite maleConversationSprite;
+    public Sprite femaleConversationSprite;
+
+    // 既存
+    public Sprite backgroundOverride;
+
+    [Header("Scene Visual Overrides (optional)")]
+    public Sprite bodyOverride;
+    public Sprite faceOverride;
+    public Sprite manMouthOverride;
+    public Sprite manRightHandOverride;
+    public Sprite manLeftHandOverride;
+    public Sprite manCrotchOverride;
+    public Sprite subOverride;
+
+
+}
+
+[Serializable]
+public class ConversationSequence
+{
+    public List<ConversationTurn> turns = new List<ConversationTurn>();
+
+    // ★追加
+    public ConversationTurn baseVisualTurn;
+    public float baseToFirstTurnFadeSeconds = 0.25f;
+
+    public bool HasTurns
+    {
+        get { return turns != null && turns.Count > 0; }
+    }
+}
+
+[Serializable]
+public class AreaConversationData
+{
+    public ConstantButtonData action;
+    public TouchArea area;
+    public ConversationSequence conversation;
+}
+
+[Serializable]
+public class SingleUseButtonData
+{
+    public Button button;
+    public ConversationSequence conversation;
+    public bool unlockOnComplete;
+    public UnlockType unlockType = UnlockType.None;
+    public bool disableAfterUse = true;
+    public bool hideAfterUse = true;
+    public List<AreaInputKey> unlockInputsOnComplete = new List<AreaInputKey>();
+
+    public List<Image> menuImagesToShowOnComplete = new List<Image>();
+}
+
+[Serializable]
+public class NextSceneData
+{
+    public string sceneName;
+    public ConversationSequence conversation;
 }
 
 public struct PoseKey : IEquatable<PoseKey>
