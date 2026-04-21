@@ -102,9 +102,6 @@ public class OsawariGameController : MonoBehaviour
     [Header("Event Conversation Advance (center click to advance)")]
     public Button eventConversationAdvanceButton; // 画面中央に置く透明ボタン推奨
 
-    [Header("Opening First Turn Transition")]
-    public float openingFirstTurnCrossFadeSeconds = 0.25f;
-
     [Header("Fade")]
     public Image fadeOverlay;
     public float fadeOutSeconds = 0.5f;
@@ -418,51 +415,13 @@ public class OsawariGameController : MonoBehaviour
 
             yield return null;
         }
-    }
 
-    private IEnumerator CrossFadeOpeningFirstTurn(float seconds)
-    {
-        seconds = Mathf.Max(0.01f, seconds);
-
-        // 対象（存在するものだけ）
-        Image[] targets = new Image[]
-        {
-        backgroundImage,
-        bodyImage,
-        faceImage,
-        subImage,
-        manMouthImage,
-        manRightHandImage,
-        manLeftHandImage,
-        manCrotchImage,
-        conversationMaleImage,
-        conversationFemaleImage,
-        };
-
-        // いったん全て α=0 にする（表示は維持したいので sprite は触らない）
         for (int i = 0; i < targets.Length; i++)
         {
             if (targets[i] == null) continue;
-            var c = targets[i].color;
-            c.a = 0f;
+            Color c = targets[i].color;
+            c.a = 1f;
             targets[i].color = c;
-        }
-
-        float t = 0f;
-        while (t < seconds)
-        {
-            t += Time.unscaledDeltaTime;
-            float a = Mathf.Clamp01(t / seconds);
-
-            for (int i = 0; i < targets.Length; i++)
-            {
-                if (targets[i] == null) continue;
-                var c = targets[i].color;
-                c.a = a;
-                targets[i].color = c;
-            }
-
-            yield return null;
         }
     }
     private void SetEventUiVisible(bool visible)
@@ -1056,7 +1015,6 @@ public class OsawariGameController : MonoBehaviour
 
     private void ShowConversationTurn(ConversationTurn turn)
     {
-        // イベント会話中だけ、男女を個別指定できる方を優先
         bool useOverrides = isEventConversationActive &&
                             (turn.maleConversationSprite != null || turn.femaleConversationSprite != null);
 
