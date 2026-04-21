@@ -17,14 +17,8 @@ public class OsawariGameController : MonoBehaviour
     public Image manCrotchImage;
     public Image subImage;
 
-    [Header("Touch Area Buttons")]
-    public Button faceAreaButton;
-    public Button rightBreastAreaButton;
-    public Button leftBreastAreaButton;
-    public Button crotchAreaButton;
-
-    [Header("Action Buttons")]
-    public List<ConstantButtonData> constantButtons = new List<ConstantButtonData>();
+    [Header("Area Actions (configure 12 keys: Face/LeftBreast/RightBreast/Mata x Left/Right/Long)")]
+    public List<AreaActionDefinition> areaActions = new List<AreaActionDefinition>();
 
     [Header("Controls")]
     public Button autoToggleButton;
@@ -63,10 +57,12 @@ public class OsawariGameController : MonoBehaviour
     public Sprite autoOffSprite;
     public Sprite autoOnSprite;
 
-    private ConstantButtonData currentAction;
+    private AreaActionDefinition currentAction;
     private TouchArea? currentArea;
     private bool autoToggleOn;
     private bool isStopped;
+    private bool isGameplayInputLocked;
+    private bool isOutfitInputPaused;
     private int backgroundIndex;
     private Coroutine valueCoroutine;
     private Coroutine stopTransitionCoroutine;
@@ -100,47 +96,27 @@ public class OsawariGameController : MonoBehaviour
             backgroundChangeButton.onClick.AddListener(HandleBackgroundChangeButton);
         }
 
-        if (faceAreaButton != null)
-        {
-            faceAreaButton.onClick.AddListener(() => HandleAreaClick(TouchArea.Face));
-        }
-
-        if (rightBreastAreaButton != null)
-        {
-            rightBreastAreaButton.onClick.AddListener(() => HandleAreaClick(TouchArea.RightBreast));
-        }
-
-        if (leftBreastAreaButton != null)
-        {
-            leftBreastAreaButton.onClick.AddListener(() => HandleAreaClick(TouchArea.LeftBreast));
-        }
-
-        if (crotchAreaButton != null)
-        {
-            crotchAreaButton.onClick.AddListener(() => HandleAreaClick(TouchArea.Crotch));
-        }
-
-        foreach (var action in constantButtons)
-        {
-            if (action?.button == null)
-            {
-                continue;
-            }
-
-            ConstantButtonData capturedAction = action;
-            capturedAction.button.onClick.AddListener(() => HandleConstantActionClick(capturedAction));
-        }
-
         InitializeSlotStates();
         HideAllMenSlotImages();
         UpdateAutoToggleIndicator();
         ApplyBackground();
     }
 
-    // Inspector helper: assign this from each touch-area button if you prefer explicit event wiring.
+    // Backward-compatible helper: treat legacy area click as left input.
     public void HandleAreaClick(TouchArea area)
     {
-        if (currentAction == null)
+        HandleAreaInput(area, AreaInputTrigger.Left);
+    }
+
+    public void HandleAreaInput(TouchArea area, AreaInputTrigger trigger)
+    {
+        if (IsGameplayInputBlocked)
+        {
+            return;
+        }
+
+        AreaActionDefinition action = FindAreaAction(area, trigger);
+        if (action == null)
         {
             return;
         }
@@ -150,36 +126,21 @@ public class OsawariGameController : MonoBehaviour
             ExitStoppedState();
         }
 
-        currentArea = area;
-        StartOrUpdateSlot(currentAction, area);
-        ApplyPose();
-        StartValueTickerIfNeeded();
-        StartRandomOnomatopoeiaIfNeeded();
-    }
-
-    public void HandleConstantActionClick(ConstantButtonData action)
-    {
-        if (action == null)
-        {
-            return;
-        }
-
+        TouchArea normalizedArea = NormalizeArea(area);
         bool actionChanged = currentAction != action;
         currentAction = action;
+        currentArea = normalizedArea;
         isStopped = false;
 
         StopStoppedTransition();
         StopStoppedLoopAudio();
 
         PlayOneShot(action.startClip, action.audioMixerGroup);
+        bool forceAutoFromLongPress = trigger == AreaInputTrigger.Long;
+        StartOrUpdateSlot(action, normalizedArea, forceAutoFromLongPress);
+        ApplyPose();
 
-        if (currentArea.HasValue)
-        {
-            StartOrUpdateSlot(action, currentArea.Value);
-            ApplyPose();
-        }
-
-        if (actionChanged)
+        if (actionChanged || forceAutoFromLongPress)
         {
             StartValueTickerIfNeeded();
             StartRandomOnomatopoeiaIfNeeded();
@@ -188,6 +149,11 @@ public class OsawariGameController : MonoBehaviour
 
     public void HandleAutoToggleButton()
     {
+        if (IsGameplayInputBlocked)
+        {
+            return;
+        }
+
         autoToggleOn = !autoToggleOn;
         UpdateAutoToggleIndicator();
 
@@ -209,6 +175,11 @@ public class OsawariGameController : MonoBehaviour
 
     public void HandleStopActionButton()
     {
+        if (IsGameplayInputBlocked)
+        {
+            return;
+        }
+
         EnterStoppedState();
     }
 
@@ -233,6 +204,21 @@ public class OsawariGameController : MonoBehaviour
         }
 
         backgroundImage.sprite = sprite;
+    }
+
+    public bool IsGameplayInputBlocked
+    {
+        get { return isGameplayInputLocked || isOutfitInputPaused; }
+    }
+
+    public void SetGameplayInputLock(bool isLocked)
+    {
+        isGameplayInputLocked = isLocked;
+    }
+
+    public void SetOutfitInputPause(bool isPaused)
+    {
+        isOutfitInputPaused = isPaused;
     }
 
     private void EnterStoppedState()
@@ -459,7 +445,7 @@ public class OsawariGameController : MonoBehaviour
     {
         while (!isStopped)
         {
-            ConstantButtonData activeAction = currentAction;
+            AreaActionDefinition activeAction = currentAction;
             if (activeAction == null || !currentArea.HasValue)
             {
                 yield break;
@@ -497,7 +483,7 @@ public class OsawariGameController : MonoBehaviour
         }
     }
 
-    private void StartOrUpdateSlot(ConstantButtonData action, TouchArea area)
+    private void StartOrUpdateSlot(AreaActionDefinition action, TouchArea area, bool forceAuto)
     {
         if (action == null)
         {
@@ -519,13 +505,13 @@ public class OsawariGameController : MonoBehaviour
 
         MenSlot targetSlot = action.targetMenSlot;
         SlotRuntimeState state = slotStates[targetSlot];
-        AreaPlayMode mode = GetAreaPlayMode(action, area);
+        AreaPlayMode mode = forceAuto ? AreaPlayMode.AutoOnly : GetAreaPlayMode(action, area);
         bool areaChanged = !state.area.HasValue || state.area.Value != area;
         bool actionChanged = state.action != action;
 
-        if (actionChanged || areaChanged || !state.isActive)
+        if (forceAuto || actionChanged || areaChanged || !state.isActive)
         {
-            StartSlot(targetSlot, action, area, mode);
+            StartSlot(targetSlot, action, area, mode, forceAuto);
             return;
         }
 
@@ -550,7 +536,7 @@ public class OsawariGameController : MonoBehaviour
         AdvanceSlotFrame(targetSlot, action);
     }
 
-    private void StartSlot(MenSlot slot, ConstantButtonData action, TouchArea area, AreaPlayMode mode)
+    private void StartSlot(MenSlot slot, AreaActionDefinition action, TouchArea area, AreaPlayMode mode, bool forceAuto)
     {
         StopSlot(slot);
 
@@ -563,7 +549,7 @@ public class OsawariGameController : MonoBehaviour
         state.isForcedAuto = false;
         slotStates[slot] = state;
 
-        if (mode == AreaPlayMode.AutoOnly)
+        if (forceAuto || mode == AreaPlayMode.AutoOnly)
         {
             StartSlotAuto(slot, action, true);
         }
@@ -573,7 +559,7 @@ public class OsawariGameController : MonoBehaviour
         }
     }
 
-    private void StartSlotAuto(MenSlot slot, ConstantButtonData action, bool forced)
+    private void StartSlotAuto(MenSlot slot, AreaActionDefinition action, bool forced)
     {
         StopSlotAuto(slot, false);
 
@@ -665,7 +651,7 @@ public class OsawariGameController : MonoBehaviour
         }
     }
 
-    private void AdvanceSlotFrame(MenSlot slot, ConstantButtonData action)
+    private void AdvanceSlotFrame(MenSlot slot, AreaActionDefinition action)
     {
         SlotRuntimeState state = slotStates[slot];
         if (action == null || !state.area.HasValue)
@@ -710,7 +696,7 @@ public class OsawariGameController : MonoBehaviour
         }
     }
 
-    private float GetAutoInterval(ConstantButtonData action)
+    private float GetAutoInterval(AreaActionDefinition action)
     {
         float baseInterval = fallbackAutoBaseInterval;
         if (action != null && action.autoBaseInterval > 0f)
@@ -727,7 +713,7 @@ public class OsawariGameController : MonoBehaviour
         return baseInterval / speedMultiplier;
     }
 
-    private PoseSet FindPose(ConstantButtonData action, TouchArea area)
+    private PoseSet FindPose(AreaActionDefinition action, TouchArea area)
     {
         if (action?.poseEntries != null)
         {
@@ -749,7 +735,7 @@ public class OsawariGameController : MonoBehaviour
         return action != null ? action.fallbackPose : null;
     }
 
-    private AreaPlayMode GetAreaPlayMode(ConstantButtonData action, TouchArea area)
+    private AreaPlayMode GetAreaPlayMode(AreaActionDefinition action, TouchArea area)
     {
         if (action?.areaModes != null)
         {
@@ -910,7 +896,7 @@ public class OsawariGameController : MonoBehaviour
 
     private class SlotRuntimeState
     {
-        public ConstantButtonData action;
+        public AreaActionDefinition action;
         public TouchArea? area;
         public int frameIndex;
         public bool isActive;
@@ -937,6 +923,55 @@ public class OsawariGameController : MonoBehaviour
             autoToggleIndicator.sprite = autoOffSprite;
         }
     }
+
+    private AreaActionDefinition FindAreaAction(TouchArea area, AreaInputTrigger trigger)
+    {
+        if (areaActions == null)
+        {
+            return null;
+        }
+
+        ActionKey actionKey = BuildActionKey(area, trigger);
+        for (int i = 0; i < areaActions.Count; i++)
+        {
+            AreaActionDefinition action = areaActions[i];
+            if (action != null && action.actionKey == actionKey)
+            {
+                return action;
+            }
+        }
+
+        return null;
+    }
+
+    private ActionKey BuildActionKey(TouchArea area, AreaInputTrigger trigger)
+    {
+        TouchArea normalizedArea = NormalizeArea(area);
+        switch (normalizedArea)
+        {
+            case TouchArea.Face:
+                return trigger == AreaInputTrigger.Right
+                    ? ActionKey.FaceRight
+                    : (trigger == AreaInputTrigger.Long ? ActionKey.FaceLong : ActionKey.FaceLeft);
+            case TouchArea.LeftBreast:
+                return trigger == AreaInputTrigger.Right
+                    ? ActionKey.LeftBreastRight
+                    : (trigger == AreaInputTrigger.Long ? ActionKey.LeftBreastLong : ActionKey.LeftBreastLeft);
+            case TouchArea.RightBreast:
+                return trigger == AreaInputTrigger.Right
+                    ? ActionKey.RightBreastRight
+                    : (trigger == AreaInputTrigger.Long ? ActionKey.RightBreastLong : ActionKey.RightBreastLeft);
+            default:
+                return trigger == AreaInputTrigger.Right
+                    ? ActionKey.MataRight
+                    : (trigger == AreaInputTrigger.Long ? ActionKey.MataLong : ActionKey.MataLeft);
+        }
+    }
+
+    private TouchArea NormalizeArea(TouchArea area)
+    {
+        return area == TouchArea.Crotch ? TouchArea.Mata : area;
+    }
 }
 
 public enum TouchArea
@@ -944,7 +979,32 @@ public enum TouchArea
     Face,
     RightBreast,
     LeftBreast,
-    Crotch
+    Mata,
+    // Legacy alias kept for compatibility with existing inspector assignments.
+    Crotch = Mata
+}
+
+public enum AreaInputTrigger
+{
+    Left,
+    Right,
+    Long
+}
+
+public enum ActionKey
+{
+    FaceLeft,
+    FaceRight,
+    FaceLong,
+    LeftBreastLeft,
+    LeftBreastRight,
+    LeftBreastLong,
+    RightBreastLeft,
+    RightBreastRight,
+    RightBreastLong,
+    MataLeft,
+    MataRight,
+    MataLong
 }
 
 public enum TopOutfit
@@ -1036,10 +1096,10 @@ public class StoppedVisualSet
 }
 
 [Serializable]
-public class ConstantButtonData
+public class AreaActionDefinition
 {
+    public ActionKey actionKey;
     public string actionName;
-    public Button button;
     public MenSlot targetMenSlot = MenSlot.Mouth;
     public bool onlyExclusive;
 
