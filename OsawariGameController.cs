@@ -1015,7 +1015,8 @@ public class OsawariGameController : MonoBehaviour
 
     private void ShowConversationTurn(ConversationTurn turn)
     {
-        bool useOverrides = turn.maleConversationSprite != null || turn.femaleConversationSprite != null;
+        bool useOverrides = isEventConversationActive &&
+                            (turn.maleConversationSprite != null || turn.femaleConversationSprite != null);
 
         Sprite maleSprite = null;
         Sprite femaleSprite = null;
